@@ -1,0 +1,154 @@
+paths:
+  input_dir: 25-10-15
+  output_dir: output
+  videos_dir: merged_videos
+  transcripts_dir: transcripts
+  speakers_dir: speaker_voice_samples
+discovery:
+  filename_pattern: (\d{2}-\d{2}-\d{2})_([a-zA-Z0-9]+)G.+\.mp4
+  date_folder_patterns:
+  - '%y-%m-%d'
+  - '%y%m%d'
+  - '%y_%m_%d'
+  - '%m-%d-%y'
+  - '%d-%m-%y'
+grouping:
+  max_time_diff_seconds: 300
+multi_camera_composition:
+  # Enable multi-camera composition (set to false to use old sequential merge)
+  enable_composition: true
+
+  # Switching strategy: how to decide which camera to show when
+  # Options: 'time_based', 'round_robin', 'audio_quality'
+  # - time_based: Switch cameras at regular intervals
+  # - round_robin: Cycle through all available cameras equally
+  # - audio_quality: Prefer cameras with better audio at each moment
+  switching_strategy: audio_quality
+
+  # How often to switch cameras (in seconds) for time_based/round_robin strategies
+  switching_interval: 5.0
+
+  # Transition style between camera angles
+  # Options: 'cut', 'crossfade'
+  # Note: 'cut' is instant, 'crossfade' requires re-encoding (slower but smoother)
+  transition_style: crossfade
+
+  # Duration of transitions in seconds (only used if transition_style is 'crossfade')
+  transition_duration: 0.28
+
+  # Audio source selection strategy
+  # Options: 'best_quality', 'first', 'longest'
+  # - best_quality: Use clip with highest audio quality score
+  # - first: Use the first clip chronologically
+  # - longest: Use the longest duration clip
+  audio_source: best_quality
+
+  # Fine audio alignment (cross-correlation) to reduce per-camera offset
+  # Uses a short window of audio from overlapping clips to estimate per-camera time shift
+  # Note: Estimates a single offset per camera for the entire event; may not fully correct
+  # drift within longer clips. For best results, keep clips short (<60s) or disable if problematic.
+  audio_alignment:
+    enabled: true
+    max_shift_seconds: 1.0          # Maximum shift to apply (prevents overcorrection)
+    analysis_window_seconds: 12.0    # Length of audio window used for correlation analysis
+    sample_rate: 16000               # Downsample rate for faster cross-correlation
+    bandpass: true                   # Apply bandpass filter to focus on speech frequencies
+    highpass_hz: 300                 # High-pass filter cutoff (removes low rumble)
+    lowpass_hz: 3000                 # Low-pass filter cutoff (removes high noise)
+
+  # Burn date/time overlay in bottom-right; Blink files are often off by 1 hour (DST)
+  timestamp_overlay:
+    enabled: true
+    font: Arial
+    font_size: 24
+    margin_v: 20
+    margin_r: 20
+    dst_offset_hours: 1
+video_processing:
+  crossfade_duration: 0.5
+transcription:
+  # Video Validation & Repair (Stage 0 - Preprocessing)
+  # All discovered videos are validated and repaired upfront before transcription.
+  # This ensures each video is repaired exactly once, with results cached for subsequent runs.
+
+  # always_repair: If true, repair all videos regardless of detected issues.
+  #                If false, only repair videos with audio/video sync issues (>100ms difference).
+  always_repair: false
+
+  # repair_cache_dir: Single unified cache directory for all repaired videos.
+  #                   Cached repairs are reused across runs, avoiding duplicate processing.
+  repair_cache_dir: output/repaired_cache
+
+  # repair_strategy: How to handle damaged/corrupted video frames
+  #   - 'fill': Duplicate last good frame for missing sections (recommended for most cases)
+  #   - 'remove_blank': Remove blank/static frames using mpdecimate filter
+  repair_strategy: fill
+
+  whisper:
+    # Force language to avoid auto-detection errors (e.g., 'en' for English, 'es' for Spanish)
+    # Set to null or omit for auto-detection
+    language: en
+
+    # Core ML Configuration (Apple Silicon only - M1/M2/M3):
+    # ggml_model_path: Path to the Core ML encoder model (.mlmodelc or .mlpackage)
+    #   - .mlmodelc: Pre-compiled Core ML model (ready to use, fastest)
+    #   - .mlpackage: Uncompiled Core ML model (auto-compiles on first use, requires Xcode CLI tools)
+    #
+    # To set up Core ML:
+    # 1. Install pywhispercpp with Core ML: WHISPER_COREML=1 pip install git+https://github.com/absadiki/pywhispercpp
+    # 2. Convert model: cd whisper.cpp/models && ./generate-coreml-model.sh medium.en
+    #    This creates: models/coreml-encoder-medium.en.mlpackage
+    # 3. Set path below to the .mlpackage (auto-compiles to .mlmodelc) or pre-compiled .mlmodelc
+    # 4. Set device: coreml
+    #
+    # Example paths:
+    #   ggml_model_path: /path/to/whisper.cpp/models/coreml-encoder-medium.en.mlmodelc  # Pre-compiled
+    #   ggml_model_path: /path/to/whisper.cpp/models/coreml-encoder-medium.en.mlpackage # Will auto-compile
+    #
+    # For non-Core ML (CPU/GPU/Metal):
+    #   ggml_model_path: /path/to/whisper.cpp/models/ggml-medium.en.bin  # Standard GGML model
+    #   device: auto  # or cpu, cuda, metal
+    ggml_model_path: /Users/andrew/zzCoding-play/whisper.cpp/models/models/coreml-encoder-large-v3-turbo.mlpackage
+
+    # Path to whisper.cpp binary (auto-detected if in PATH or standard locations)
+    # Leave commented out for auto-detection, or specify explicit path:
+    whisper_cpp_binary: /Users/andrew/zzCoding-play/whisper.cpp/build/bin/whisper-cli
+
+    # Device for inference:
+    #   - 'coreml': Core ML acceleration (Apple Silicon only, requires .mlmodelc or .mlpackage path)
+    #   - 'auto': Automatically select best available (Metal on macOS, CUDA on Linux/Windows with GPU)
+    #   - 'cpu': CPU-only inference
+    #   - 'cuda': NVIDIA GPU acceleration (requires CUDA build)
+    #   - 'metal': Metal GPU acceleration (macOS)
+    device: coreml
+
+    beam_size: 5
+    temperature: 0.0
+  diarization:
+    model_id: pyannote/speaker-diarization-3.1
+    auth_token_env:
+    - HF_TOKEN
+    - HUGGINGFACE_TOKEN
+    min_overlap_ratio: 0.6
+speaker_identification:
+  embedding_model_id: pyannote/wespeaker-voxceleb-resnet34-LM
+  auth_token_env:
+  - HF_TOKEN
+  - HUGGINGFACE_TOKEN
+  device: GPU
+  similarity_threshold: 0.68
+speakers:
+  known_speakers: {}
+concurrency:
+  # Stage 0: Video validation and repair (I/O-bound, uses ffmpeg)
+  # Lower count recommended to avoid saturating disk I/O
+  # Each worker runs ffmpeg which is multi-threaded internally
+  validation_workers: 2
+
+  # Stage 3: Transcription and diarization (compute-bound, uses AI models)
+  # Higher count beneficial on systems with good CPU/GPU
+  transcription_workers: 2
+
+  # Stage 5: Video merging and composition (I/O-bound, uses ffmpeg)
+  # Moderate count for parallel merging without overwhelming disk
+  merge_workers: 3

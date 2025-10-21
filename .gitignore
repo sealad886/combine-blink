@@ -1,0 +1,65 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Output directories
+output/
+!output/.gitkeep
+
+# Except documentation
+!output/README.md
+
+# Cache directories
+output/repaired_cache/
+output/repair_strategy_cache/
+output/test_repairs/
+
+# Progress tracking files (resume capability)
+output/repaired_cache/.preprocessing_progress.json
+.preprocessing_progress.json
+
+# Test outputs
+*.mp4
+*.wav
+*.txt
+!requirements.txt
+!README.md
+!*.md
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
