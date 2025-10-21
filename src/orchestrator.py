@@ -147,25 +147,30 @@ def _merge_group_job(args: Tuple[str, List[Dict[str, Any]], str, Dict[str, Any],
 
     # Update progress via shared dict - show total clips being merged
     total_clips = len(video_clips)
-    
+
     # Initialize progress entry with start_time
     progress_dict[task_id] = {
-        "progress": 0, 
-        "total": total_clips, 
+        "progress": 0,
+        "total": total_clips,
         "visible": True,
         "start_time": time.time()
     }
 
     # Progress callback to update shared dict
+    # NOTE: This must be defined in the worker process (not passed as a closure)
+    # because closures cannot be pickled for multiprocessing
     def update_progress(completed: int, total: int):
         """Update progress in shared dict for dashboard."""
-        progress_dict[task_id] = {
-            "progress": completed, 
-            "total": total, 
-            "visible": True,
-            "start_time": progress_dict[task_id].get("start_time", time.time())
-        }
-        logger.debug(f"Progress update for {group_name}: {completed}/{total}")
+        try:
+            progress_dict[task_id] = {
+                "progress": completed,
+                "total": total,
+                "visible": True,
+                "start_time": progress_dict[task_id].get("start_time", time.time())
+            }
+            logger.info(f"[PROGRESS] {group_name}: {completed}/{total}")
+        except Exception as e:
+            logger.warning(f"Failed to update progress: {e}")
 
     # Use multi-camera composer if enabled and multiple cameras detected
     cameras = set(clip['camera'] for clip in video_clips)
@@ -586,6 +591,8 @@ def main():
                                 if isinstance(update_data, dict) and task_id.startswith('merge_'):
                                     group_name = task_id.replace('merge_', '')
                                     latest = update_data.get("progress", 0)
+                                    total = update_data.get("total", 0)
+                                    logger.debug(f"[MONITOR] Reading progress for {group_name}: {latest}/{total}")
                                     dashboard.update_substage('merge', group_name, latest)
 
                             if n_finished >= len(futures):

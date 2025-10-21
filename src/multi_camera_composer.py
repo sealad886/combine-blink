@@ -13,7 +13,7 @@ import subprocess
 import tempfile
 import json
 from datetime import datetime, timedelta
-from typing import List, Dict, Any, Tuple, Optional
+from typing import Callable, List, Dict, Any, Tuple, Optional
 from dataclasses import dataclass
 import numpy as np
 
@@ -224,7 +224,7 @@ class MultiCameraComposer:
         output_path: str,
         speech_segments: Optional[List[Dict[str, Any]]] = None,
         speech_timeline: Optional[List[Dict[str, Any]]] = None,
-        progress_callback: Optional[callable] = None,
+        progress_callback: Optional[Callable] = None,
     ) -> bool:
         """
         Create a composite video from multiple camera angles of the same event.
@@ -260,14 +260,15 @@ class MultiCameraComposer:
 
         # Calculate total steps for progress tracking
         total_steps = len(video_clips)
-        
+
         def _report_progress(completed: int):
             """Helper to report progress if callback provided."""
             if progress_callback:
                 try:
+                    logging.info(f"[COMPOSER] Reporting progress: {completed}/{total_steps}")
                     progress_callback(completed, total_steps)
                 except Exception as e:
-                    logging.warning(f"Progress callback error: {e}")
+                    logging.warning(f"Progress callback error: {e}", exc_info=True)
 
         try:
             # Step 1: Analyze audio quality for each clip and capture event start (20% of work)

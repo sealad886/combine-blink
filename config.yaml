@@ -201,4 +201,4 @@ logging:
   # - INFO: General information about pipeline execution (recommended)
   # - WARNING: Only warnings and errors
   # - ERROR: Only errors and critical issues
-  log_level: INFO
+  log_level: DEBUG

@@ -110,6 +110,9 @@ def test_resume_integration():
 
         # Verify all videos completed
         loaded_final = _load_progress(cache_dir)
+        if not loaded_final:
+            print("   ❌ FAIL: Could not load final progress")
+            return False
         if len(loaded_final['completed']) != 50:
             print(f"   ❌ FAIL: Expected 50 completed, got {len(loaded_final['completed'])}")
             return False
@@ -152,6 +155,10 @@ def test_resume_with_new_videos():
 
         from src.media_validation import _load_progress
         loaded = _load_progress(cache_dir)
+
+        if not loaded:
+            print("   ❌ FAIL: Could not load progress for second run")
+            return False
 
         # Check which videos would be skipped
         already_done = [p for p in video_paths_v2 if p in loaded['completed']]
@@ -211,6 +218,10 @@ def test_resume_with_errors():
         # Load and verify
         from src.media_validation import _load_progress
         loaded = _load_progress(cache_dir)
+
+        if not loaded:
+            print("   ❌ FAIL: Could not load progress")
+            return False
 
         if len(loaded['completed']) != 10:
             print(f"   ❌ FAIL: Expected 10 completed, got {len(loaded['completed'])}")

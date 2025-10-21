@@ -229,131 +229,107 @@ def preprocess_videos(
     # Create cache directory
     os.makedirs(cache_dir, exist_ok=True)
 
-    # Check for previous incomplete run
-    prior_progress = _load_progress(cache_dir) if enable_resume else None
+    total = len(video_paths)
     path_mapping: Dict[str, str] = {}
-    already_completed = 0
+
+    # Load previous progress if resuming
+    prior_progress = _load_progress(cache_dir) if enable_resume else None
+    start_time = datetime.now().isoformat()
 
     if prior_progress:
+        # Restore completed videos from previous run
         completed_videos = prior_progress.get('completed', {})
+        start_time = prior_progress.get('start_time', start_time)
 
-        # Restore previously completed videos
         for video_path in video_paths:
             if video_path in completed_videos:
-                result = completed_videos[video_path]
-                path_mapping[video_path] = result['validated_path']
-                already_completed += 1
+                path_mapping[video_path] = completed_videos[video_path]['validated_path']
 
-        if already_completed > 0:
+        if path_mapping:
             logging.info(
-                f"Resuming preprocessing: {already_completed}/{len(video_paths)} videos "
-                f"already completed (started {prior_progress.get('start_time', 'unknown')})"
+                f"Resuming from previous run: {len(path_mapping)}/{total} videos already completed"
             )
 
-            # Report already-completed videos to progress callback
-            if progress_callback:
-                progress_callback(already_completed, len(video_paths))
-
-    # Build job list, filtering out already-completed videos
+    # Build job list for videos that still need processing
     jobs = [(path, cache_dir, strategy, always_repair)
             for path in video_paths
             if path not in path_mapping]
 
-    # Track results
-    completed = already_completed
-    total = len(video_paths)
-    repaired_count = 0
-    cached_count = 0
-    original_count = 0
+    if not jobs:
+        # All videos already completed
+        logging.info(f"All {total} videos already completed, nothing to process")
+        if enable_resume:
+            _delete_progress(cache_dir)
+        return path_mapping
 
-    # Initialize progress tracking
-    if enable_resume and jobs:
+    # Process remaining videos
+    logging.info(f"Processing {len(jobs)} video(s)...")
+    completed_count = len(path_mapping)  # Start from already-completed count
+    save_interval = max(1, len(jobs) // 20)  # Save progress every ~5%
+    videos_since_save = 0
+
+    with ProcessPoolExecutor(max_workers=max_workers, initializer=_init_worker) as executor:
+        futures = {executor.submit(_validate_video_job, job): job[0] for job in jobs}
+
+        for future in as_completed(futures):
+            original_path = futures[future]
+            try:
+                orig_path, validated_path, status = future.result()
+                path_mapping[orig_path] = validated_path
+                completed_count += 1
+                videos_since_save += 1
+
+                # Batch progress saves (every N videos or at end)
+                if enable_resume and videos_since_save >= save_interval:
+                    progress_data = {
+                        'start_time': start_time,
+                        'total': total,
+                        'completed': {path: {'validated_path': vpath}
+                                     for path, vpath in path_mapping.items()},
+                        'strategy': strategy,
+                        'always_repair': always_repair
+                    }
+                    _save_progress(cache_dir, progress_data)
+                    videos_since_save = 0
+
+                # Report progress
+                if progress_callback:
+                    progress_callback(completed_count, total)
+
+            except Exception as exc:
+                logging.error(f"Validation failed for {original_path}: {exc}")
+                # Fall back to original path
+                path_mapping[original_path] = original_path
+                completed_count += 1
+
+                if progress_callback:
+                    progress_callback(completed_count, total)
+
+    # Final progress save if needed
+    if enable_resume and videos_since_save > 0:
         progress_data = {
-            'start_time': datetime.now().isoformat(),
+            'start_time': start_time,
             'total': total,
-            'completed': {path: {'validated_path': validated_path}
-                         for path, validated_path in path_mapping.items()},
+            'completed': {path: {'validated_path': vpath}
+                         for path, vpath in path_mapping.items()},
             'strategy': strategy,
             'always_repair': always_repair
         }
         _save_progress(cache_dir, progress_data)
 
-    # Process remaining videos in parallel with optimized worker initialization
-    if jobs:
-        with ProcessPoolExecutor(max_workers=max_workers, initializer=_init_worker) as executor:
-            futures = {executor.submit(_validate_video_job, job): job[0] for job in jobs}
-
-            for future in as_completed(futures):
-                original_path = futures[future]
-                try:
-                    orig_path, validated_path, status = future.result()
-                    path_mapping[orig_path] = validated_path
-
-                    # Track statistics using clear status strings
-                    if status == 'repaired':
-                        repaired_count += 1
-                    elif status == 'cached':
-                        cached_count += 1
-                    elif status == 'original':
-                        original_count += 1
-
-                    completed += 1
-
-                    # Save progress after each video (if resume enabled)
-                    if enable_resume:
-                        progress_data = {
-                            'start_time': prior_progress.get('start_time') if prior_progress else datetime.now().isoformat(),
-                            'total': total,
-                            'completed': {path: {'validated_path': validated_path}
-                                         for path, validated_path in path_mapping.items()},
-                            'strategy': strategy,
-                            'always_repair': always_repair
-                        }
-                        _save_progress(cache_dir, progress_data)
-
-                    if progress_callback:
-                        progress_callback(completed, total)
-
-                except Exception as exc:
-                    logging.error(f"Validation failed for {original_path}: {exc}")
-                    # Fall back to original path
-                    path_mapping[original_path] = original_path
-                    original_count += 1
-                    completed += 1
-
-                    # Save progress even on errors
-                    if enable_resume:
-                        progress_data = {
-                            'start_time': prior_progress.get('start_time') if prior_progress else datetime.now().isoformat(),
-                            'total': total,
-                            'completed': {path: {'validated_path': validated_path}
-                                         for path, validated_path in path_mapping.items()},
-                            'strategy': strategy,
-                            'always_repair': always_repair
-                        }
-                        _save_progress(cache_dir, progress_data)
-
-                    if progress_callback:
-                        progress_callback(completed, total)
-
     # Delete progress file on successful completion
     if enable_resume:
         _delete_progress(cache_dir)
 
+    # Calculate final statistics
+    total_repaired = sum(1 for orig, validated in path_mapping.items() if orig != validated)
+    total_original = total - total_repaired
+
     # Log summary
-    if already_completed > 0:
-        logging.info(
-            f"Video validation complete: {total} videos total, "
-            f"{already_completed} resumed from previous run, "
-            f"{len(jobs)} processed in this run "
-            f"({repaired_count} newly repaired, {cached_count} from cache, {original_count} used as-is)"
-        )
-    else:
-        logging.info(
-            f"Video validation complete: {total} videos processed, "
-            f"{repaired_count} newly repaired, {cached_count} from cache, "
-            f"{original_count} used as-is"
-        )
+    logging.info(
+        f"Video validation complete: {total} videos total, "
+        f"{total_repaired} repaired, {total_original} used as-is"
+    )
 
     return path_mapping
 
