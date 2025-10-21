@@ -7,6 +7,9 @@ paths:
 discovery:
   filename_pattern: (\d{2}-\d{2}-\d{2})_([a-zA-Z0-9]+)G.+\.mp4
   date_folder_patterns:
+  - '%Y-%m-%d'
+  - '%Y%m%d'
+  - '%Y_%m_%d'
   - '%y-%m-%d'
   - '%y%m%d'
   - '%y_%m_%d'
@@ -19,11 +22,12 @@ multi_camera_composition:
   enable_composition: true
 
   # Switching strategy: how to decide which camera to show when
-  # Options: 'time_based', 'round_robin', 'audio_quality'
+  # Options: 'time_based', 'round_robin', 'audio_quality', 'speech_people'
   # - time_based: Switch cameras at regular intervals
   # - round_robin: Cycle through all available cameras equally
   # - audio_quality: Prefer cameras with better audio at each moment
-  switching_strategy: audio_quality
+  # - speech_people: Use diarized speech to anchor the speaking camera; when silent, switch to the angle with the most people and flag a review indicator (requires people detection)
+  switching_strategy: speech_people
 
   # How often to switch cameras (in seconds) for time_based/round_robin strategies
   switching_interval: 5.0
@@ -36,12 +40,43 @@ multi_camera_composition:
   # Duration of transitions in seconds (only used if transition_style is 'crossfade')
   transition_duration: 0.28
 
+  # Crossfade duration between consecutive audio segments (seconds)
+  audio_crossfade_seconds: 0.06
+
   # Audio source selection strategy
   # Options: 'best_quality', 'first', 'longest'
   # - best_quality: Use clip with highest audio quality score
   # - first: Use the first clip chronologically
   # - longest: Use the longest duration clip
   audio_source: best_quality
+
+  # Weight individual metrics when ranking audio (should sum to ~1.0)
+  audio_quality_weights:
+    rms: 0.4          # Overall loudness within a healthy speech range
+    peak: 0.2         # Penalize clipping when peaks approach 0 dBFS
+    noise: 0.2        # Reward larger gap between average level and noise floor
+    clipping: 0.2     # Penalize repeated peak hits indicative of distortion
+
+  # Clean up the selected audio track before stitching segments
+  audio_cleanup:
+    enabled: true
+    highpass_hz: 120         # Remove low-frequency rumble
+    lowpass_hz: 7000         # Tuck away brittle high-frequency noise
+    denoise: true            # Apply fft-based denoiser (afftdn)
+    denoise_nf: -25.0        # Noise floor reference (dB) for denoiser
+    loudness_normalize: true # Per-segment loudness normalization (loudnorm)
+    loudnorm_target_i: -24.0
+    loudnorm_target_tp: -2.0
+    loudnorm_target_lra: 11.0
+    extra_filters: []        # Optional list of additional ffmpeg audio filters
+
+  # Estimate how many people are visible in each angle to guide silent segments
+  # (requires opencv-python; disable if performance is a concern)
+  people_detection:
+    enabled: true
+    sample_frames: 6         # Number of frames sampled across each clip
+    resize_width: 640        # Resize width for detector (keeps runtime bounded)
+    min_frame_width: 320     # Minimum width to avoid undersized frames
 
   # Fine audio alignment (cross-correlation) to reduce per-camera offset
   # Uses a short window of audio from overlapping clips to estimate per-camera time shift
@@ -51,10 +86,12 @@ multi_camera_composition:
     enabled: true
     max_shift_seconds: 1.0          # Maximum shift to apply (prevents overcorrection)
     analysis_window_seconds: 12.0    # Length of audio window used for correlation analysis
+    hop_seconds: 6.0                 # Hop between analysis windows (default: window/2)
     sample_rate: 16000               # Downsample rate for faster cross-correlation
     bandpass: true                   # Apply bandpass filter to focus on speech frequencies
     highpass_hz: 300                 # High-pass filter cutoff (removes low rumble)
     lowpass_hz: 3000                 # Low-pass filter cutoff (removes high noise)
+    estimate_drift: true             # Estimate slow drift (seconds per second) and correct in audio
 
   # Burn date/time overlay in bottom-right; Blink files are often off by 1 hour (DST)
   timestamp_overlay:
@@ -152,3 +189,16 @@ concurrency:
   # Stage 5: Video merging and composition (I/O-bound, uses ffmpeg)
   # Moderate count for parallel merging without overwhelming disk
   merge_workers: 3
+
+# Logging configuration
+logging:
+  # Directory for log files (relative to project root or absolute path)
+  log_dir: logs
+
+  # Minimum log level to record
+  # Options: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  # - DEBUG: Very detailed, useful for troubleshooting
+  # - INFO: General information about pipeline execution (recommended)
+  # - WARNING: Only warnings and errors
+  # - ERROR: Only errors and critical issues
+  log_level: INFO

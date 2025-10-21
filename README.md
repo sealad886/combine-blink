@@ -18,6 +18,9 @@ This project provides a modular pipeline to process and consolidate Blink securi
 * **Configuration Driven:** All major settings are controlled via a config.yaml file.
 * **Concurrent Processing:** Transcription/diarization and video composition run in parallel across groups with configurable worker counts; speaker identification stays serial to maintain a consistent voiceprint database.
 
+Looking for in-depth documentation (configuration, dashboard API, resume guide)?
+Start with [`docs/README.md`](docs/README.md). For details on the new multi-window GCC‑PHAT alignment and audio stitching, see [`ALIGNMENT_ALGORITHM.md`](ALIGNMENT_ALGORITHM.md).
+
 ## **Project Structure**
 
 .
@@ -70,6 +73,7 @@ Where:
 1. Install Dependencies:
    It is highly recommended to use a virtual environment.
    pip install \-r requirements.txt
+   The multi-camera composer samples a handful of frames per clip using OpenCV's HOG person detector. `opencv-python` ships with `requirements.txt`; if you'd rather skip it, disable `multi_camera_composition.people_detection.enabled` (silent segments will revert to audio-only selection and the review indicator will not be shown).
 
 ### Hugging Face access token (required for diarization/embeddings)
 
@@ -264,7 +268,7 @@ With max_time_diff_seconds = 60:
 
 ### Composition Strategies
 
-The pipeline offers three camera switching strategies:
+The pipeline offers four camera switching strategies:
 
 #### 1. Time-Based Switching (Default)
 ```yaml
@@ -296,6 +300,18 @@ multi_camera_composition:
 - Ensures every camera gets equal screen time
 - Useful for balanced coverage of the scene
 
+#### 4. Speech + People-Aware Switching
+```yaml
+multi_camera_composition:
+  switching_strategy: speech_people
+  people_detection:
+    enabled: true      # requires opencv-python (default from requirements.txt)
+```
+- Keeps the active speaker on screen whenever diarized speech is present (Stage 3 output required)
+- During silent stretches, switches to the camera showing the largest number of people (via OpenCV's HOG detector)
+- Highlights those silent, multi-angle moments with a "Review Alt Angles" overlay so you can double-check alternate views later
+- Falls back to audio-based selection automatically when people detection is disabled or OpenCV is unavailable
+
 ### Audio Source Selection
 
 The pipeline analyzes audio quality across all cameras and can select the best source:
@@ -309,26 +325,40 @@ multi_camera_composition:
 - **`first`**: Uses audio from the first camera that triggered
 - **`longest`**: Uses audio from the camera with the longest recording duration
 
-### Fine Audio Alignment (per-camera)
+### Fine Audio Alignment (per-camera, multi-window GCC‑PHAT + drift)
 
-Different Blink cameras can have slight clock drift or per-file A/V offsets. The composer estimates a small per-camera offset using audio cross-correlation and applies it uniformly to all clips of that camera within the event. This reduces lip-sync and inter-camera misalignment.
+Different Blink cameras can have slight clock drift or per-file A/V offsets. The composer runs a robust, multi-window GCC‑PHAT analysis to estimate a small per-camera base offset and an optional slow linear drift (seconds per second) relative to the best‑audio reference camera. Base offsets are applied to video clip start times; the time‑varying correction (base + drift × t) is applied to audio segment extraction so the audio bed stays tightly locked across the event.
 
 ```yaml
 multi_camera_composition:
    audio_alignment:
       enabled: true
-      max_shift_seconds: 1.5           # clamp estimated offset to avoid overcorrection
-      analysis_window_seconds: 12.0     # window length used for correlation
-      sample_rate: 16000                # resample rate for analysis
-      bandpass: true                    # focus on speech band
+      max_shift_seconds: 1.0            # clamp estimated offset to avoid overcorrection
+      analysis_window_seconds: 12.0      # window length used for correlation
+      hop_seconds: 6.0                   # hop between windows (default = window/2)
+      sample_rate: 16000                 # resample rate for analysis
+      bandpass: true                     # focus on speech band
       highpass_hz: 300
       lowpass_hz: 3000
+      estimate_drift: true               # estimate slow drift and correct in audio
 ```
 
 Notes:
 - The reference camera is chosen by best audio quality; other cameras are aligned to it.
-- If overlap between cameras is < 5s, alignment falls back to 0 for that camera.
+- Multi-window estimates use robust (median) aggregation; drift is bounded to ±1 ms/s.
+- If overlap between cameras is too short, alignment falls back to 0 for that camera.
 - Set `enabled: false` to turn off.
+
+### Audio Stitching Crossfades
+
+To avoid clicks at segment boundaries, audio segments are stitched using ffmpeg `acrossfade` with short triangular crossfades:
+
+```yaml
+multi_camera_composition:
+   audio_crossfade_seconds: 0.06  # Crossfade between consecutive audio segments
+```
+
+This maintains perceived continuity while keeping total duration consistent.
 
 ### Timestamp Overlay (with DST correction)
 
@@ -369,6 +399,9 @@ multi_camera_composition:
 
   # Crossfade duration in seconds (only used if transition_style is 'crossfade')
   transition_duration: 0.5
+
+   # Crossfade between audio segments (triangular acrossfade)
+   audio_crossfade_seconds: 0.06
 
   # Audio source selection: 'best_quality', 'first', or 'longest'
   audio_source: best_quality
@@ -566,7 +599,7 @@ To test the resume functionality:
 4. Watch for "Skipping {group_name}" messages in the logs
 5. Verify that existing files are not re-created
 
-For more details, see [RESUME_FUNCTIONALITY.md](RESUME_FUNCTIONALITY.md).
+For more details, see [`docs/components/resume.md`](docs/components/resume.md).
 
 ## **How It Works**
 
@@ -590,10 +623,10 @@ The pipeline executes a series of stages in a specific order:
 
    d. **Multi-Camera Composition / Video Merging**:
       - **Multi-Camera Groups**: If the group contains clips from multiple cameras, the multi-camera composer:
-        1. Analyzes audio quality for each camera
-        2. Selects the best audio source
-        3. Generates a switching timeline based on the configured strategy
-        4. Creates a composite video with automatic angle switching
+        1. Analyzes audio quality for each camera and (when the `speech_people` strategy is selected) estimates how many people are visible using OpenCV's built-in person detector
+        2. Selects the best audio source and aligns clips against the diarized speech timeline when available
+        3. Generates a switching timeline based on the configured strategy—`speech_people` keeps the speaking camera in view and, during silent moments, switches to the angle with the most people
+        4. Creates a composite video with automatic angle switching; with `speech_people`, a top-right "Review Alt Angles" indicator is displayed whenever multiple angles contain people during a silent stretch
       - **Single-Camera Groups**: Uses simple sequential merge with crossfade transitions
 
    e. **Output Generation**: The final composite/merged video, the diarized transcript (with speaker names substituted from the config), and the speaker voice samples are all saved to the output\_dir.
