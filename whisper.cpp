@@ -1,1 +1,0 @@
-/Users/andrew/zzCoding-play/whisper.cpp
