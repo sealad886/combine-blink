@@ -1,10 +1,12 @@
 import os
+import sys
 import yaml
 import logging
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
+import time
 from rich.progress import Progress, TaskID
 from .discovery import discover_files
 from .grouping import group_videos
@@ -13,21 +15,29 @@ from .transcription import process_audio_for_transcription
 from .identify_speaker import SpeakerIdentifier
 from .video import merge_video_clips
 from .multi_camera_composer import MultiCameraComposer
-from .progress import ProgressTracker
-
-# --- Basic Logging Setup ---
-logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
+from .pipeline_dashboard import PipelineDashboard
+from .logging_config import setup_pipeline_logging, configure_worker_logging
 
 def load_config():
     """Loads the YAML configuration file."""
     try:
         with open('config.yaml', 'r') as f:
-            return yaml.safe_load(f)
+            config = yaml.safe_load(f)
+
+        # Add default logging configuration if not present
+        if 'logging' not in config:
+            config['logging'] = {
+                'log_dir': 'logs',
+                'log_level': 'INFO'
+            }
+
+        return config
     except FileNotFoundError:
-        logging.error("Configuration file 'config.yaml' not found. Please create one.")
+        # Use basic logging since our logging system isn't set up yet
+        print("ERROR: Configuration file 'config.yaml' not found. Please create one.", file=sys.stderr)
         exit(1)
     except yaml.YAMLError as e:
-        logging.error(f"Error parsing configuration file: {e}")
+        print(f"ERROR: Error parsing configuration file: {e}", file=sys.stderr)
         exit(1)
 
 def setup_directories(config):
@@ -84,8 +94,13 @@ def _transcribe_group_job(args: Tuple[str, List[str], Dict[str, Any], Any, Any])
     - Progress: number of clips completed so far
     """
     group_name, video_paths, config, progress_dict, task_id = args
-    # Suppress verbose logging in workers
-    logging.getLogger().setLevel(logging.ERROR)
+
+    # Configure worker logging (file-based, not console)
+    log_dir = config.get('logging', {}).get('log_dir', 'logs')
+    configure_worker_logging(log_dir)
+
+    logger = logging.getLogger("pipeline.transcription")
+    logger.info(f"Starting transcription for group: {group_name} ({len(video_paths)} clips)")
 
     # Initialize progress with actual number of clips to process
     total_clips = len(video_paths)
@@ -96,7 +111,12 @@ def _transcribe_group_job(args: Tuple[str, List[str], Dict[str, Any], Any, Any])
         progress_dict[task_id] = {"progress": completed_clips, "total": total_clips, "visible": True}
 
     # Pass progress callback to transcription
-    diarization_result = process_audio_for_transcription(video_paths, config, progress_callback=progress_callback)
+    try:
+        diarization_result = process_audio_for_transcription(video_paths, config, progress_callback=progress_callback)
+        logger.info(f"Transcription completed for group: {group_name}")
+    except Exception as exc:
+        logger.error(f"Transcription failed for group: {group_name}", exc_info=True)
+        diarization_result = None
 
     # Derive processed (repaired/original) paths for later merging
     if diarization_result and 'timeline' in diarization_result:
@@ -114,14 +134,38 @@ def _transcribe_group_job(args: Tuple[str, List[str], Dict[str, Any], Any, Any])
     return group_name, processed_video_paths, diarization_result
 
 
-def _merge_group_job(args: Tuple[str, List[Dict[str, Any]], str, Dict[str, Any], Any, Any]) -> Tuple[str, bool, str]:
+def _merge_group_job(args: Tuple[str, List[Dict[str, Any]], str, Dict[str, Any], Optional[Dict[str, Any]], Any, Any]) -> Tuple[str, bool, str]:
     """Worker: run Stage 5 merge/composition for a single group."""
-    group_name, video_clips, output_video_path, config, progress_dict, task_id = args
-    # Suppress verbose logging in workers
-    logging.getLogger().setLevel(logging.ERROR)
+    group_name, video_clips, output_video_path, config, diarization_result, progress_dict, task_id = args
 
-    # Update progress via shared dict
-    progress_dict[task_id] = {"progress": 0, "total": 1, "visible": True}
+    # Configure worker logging (file-based, not console)
+    log_dir = config.get('logging', {}).get('log_dir', 'logs')
+    configure_worker_logging(log_dir)
+
+    logger = logging.getLogger("pipeline.merge")
+    logger.info(f"Starting merge for group: {group_name} ({len(video_clips)} clips)")
+
+    # Update progress via shared dict - show total clips being merged
+    total_clips = len(video_clips)
+    
+    # Initialize progress entry with start_time
+    progress_dict[task_id] = {
+        "progress": 0, 
+        "total": total_clips, 
+        "visible": True,
+        "start_time": time.time()
+    }
+
+    # Progress callback to update shared dict
+    def update_progress(completed: int, total: int):
+        """Update progress in shared dict for dashboard."""
+        progress_dict[task_id] = {
+            "progress": completed, 
+            "total": total, 
+            "visible": True,
+            "start_time": progress_dict[task_id].get("start_time", time.time())
+        }
+        logger.debug(f"Progress update for {group_name}: {completed}/{total}")
 
     # Use multi-camera composer if enabled and multiple cameras detected
     cameras = set(clip['camera'] for clip in video_clips)
@@ -130,20 +174,43 @@ def _merge_group_job(args: Tuple[str, List[Dict[str, Any]], str, Dict[str, Any],
         config.get('multi_camera_composition', {}).get('enable_composition', True)
     )
 
-    if use_composer:
-        # Multi-camera composition
-        composer = MultiCameraComposer(config)
-        ok = composer.compose_multi_camera_event(video_clips, output_video_path)
-    else:
-        # Fallback to sequential merge (single camera or composition disabled)
-        # Extract processed paths in chronological order
-        sorted_clips = sorted(video_clips, key=lambda x: x['datetime'])
-        processed_video_paths = [clip['path'] for clip in sorted_clips]
-        crossfade = config['video_processing']['crossfade_duration']
-        ok = merge_video_clips(processed_video_paths, output_video_path, crossfade)
+    try:
+        if use_composer:
+            # Multi-camera composition
+            logger.info(f"Using multi-camera composition for {group_name} ({len(cameras)} cameras)")
+            composer = MultiCameraComposer(config)
+            speech_segments = None
+            speech_timeline = None
+            if diarization_result:
+                speech_segments = diarization_result.get('segments')
+                speech_timeline = diarization_result.get('timeline')
+            ok = composer.compose_multi_camera_event(
+                video_clips,
+                output_video_path,
+                speech_segments=speech_segments,
+                speech_timeline=speech_timeline,
+                progress_callback=update_progress,
+            )
+        else:
+            # Fallback to sequential merge (single camera or composition disabled)
+            logger.info(f"Using sequential merge for {group_name}")
+            # Extract processed paths in chronological order
+            sorted_clips = sorted(video_clips, key=lambda x: x['datetime'])
+            processed_video_paths = [clip['path'] for clip in sorted_clips]
+            crossfade = config.get('video_processing', {}).get('crossfade_duration', 0.5)
+            ok = merge_video_clips(processed_video_paths, output_video_path, crossfade)
 
-    # Mark as complete
-    progress_dict[task_id] = {"progress": 1, "total": 1, "visible": False}
+        if ok:
+            logger.info(f"Merge completed successfully for group: {group_name}")
+        else:
+            logger.error(f"Merge failed for group: {group_name}")
+
+    except Exception as exc:
+        logger.error(f"Merge error for group: {group_name}", exc_info=True)
+        ok = False
+
+    # Mark as complete - all clips merged
+    progress_dict[task_id] = {"progress": total_clips, "total": total_clips, "visible": False}
 
     return group_name, ok, output_video_path
 
@@ -153,10 +220,17 @@ def main():
     config = load_config()
     setup_directories(config)
 
+    # Set up comprehensive file-based logging
+    pipeline_logger = setup_pipeline_logging(config)
+    logger = pipeline_logger.get_logger()
+
     # --- STAGE 1: File Discovery ---
     print(f"\n{'='*80}")
     print("🎬 BLINK VIDEO PROCESSING PIPELINE")
     print(f"{'='*80}\n")
+
+    logger.info("Starting pipeline execution")
+    pipeline_logger.log_stage_start("File Discovery", 1)
 
     # Check for existing output to inform user about resume capability
     transcripts_dir_check = os.path.join(config['paths']['output_dir'], config['paths']['transcripts_dir'])
@@ -175,11 +249,18 @@ def main():
         config['discovery']['filename_pattern'],
         config
     )
+
     if not video_files:
         print("⚠️  No video files found. Exiting.")
+        logger.warning("No video files found in input directory")
+        pipeline_logger.log_session_end(success=False)
         return
 
+    logger.info(f"Discovered {len(video_files)} video files")
+    pipeline_logger.log_stage_end("File Discovery", 1, success=True, details=f"{len(video_files)} files found")
+
     # --- STAGE 2: Video Grouping ---
+    pipeline_logger.log_stage_start("Video Grouping", 2)
     video_groups = group_videos(video_files, config['grouping']['max_time_diff_seconds'])
 
     # Calculate total clips
@@ -189,10 +270,17 @@ def main():
     print(f"📊 Grouped into {len(video_groups)} events")
     print(f"🎞  Total clips to process: {total_clips}\n")
 
+    logger.info(f"Grouped {len(video_files)} files into {len(video_groups)} events")
+    logger.info(f"Total clips to process: {total_clips}")
+    pipeline_logger.log_stage_end("Video Grouping", 2, success=True,
+                                  details=f"{len(video_groups)} groups, {total_clips} total clips")
+
     # --- STAGE 0: Video Validation & Repair (Preprocessing) ---
     print(f"{'='*80}")
     print("🔍 STAGE 0: Video Validation & Repair")
     print(f"{'='*80}\n")
+
+    pipeline_logger.log_stage_start("Video Validation & Repair", 0)
 
     # Get repair configuration
     repair_config = config.get('transcription', {})
@@ -211,21 +299,25 @@ def main():
     print(f"Repair strategy: {repair_strategy}")
     print(f"Always repair: {'Yes' if always_repair else 'No (only when needed)'}\n")
 
-    # Preprocess all videos with progress tracking
-    from rich.progress import Progress as RichProgress, BarColumn, TextColumn, TimeRemainingColumn
+    logger.info(f"Starting validation of {len(all_video_paths)} unique video files")
+    logger.info(f"Repair cache: {repair_cache_dir}")
+    logger.info(f"Repair strategy: {repair_strategy}")
+    logger.info(f"Always repair: {always_repair}")
 
-    with RichProgress(
-        TextColumn("[bold blue]{task.description}"),
-        BarColumn(),
-        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-        TextColumn("•"),
-        TextColumn("{task.completed}/{task.total} videos"),
-        TimeRemainingColumn(),
-    ) as rich_progress:
-        validation_task = rich_progress.add_task("Validating videos", total=len(all_video_paths))
+    # Initialize dashboard early to show validation progress
+    dashboard = PipelineDashboard(
+        total_videos=len(all_video_paths),
+        total_groups=len(video_groups),
+        total_clips=total_clips
+    )
+
+    # Start dashboard
+    with dashboard:
+        # Start validation stage
+        dashboard.start_stage('validation', len(all_video_paths))
 
         def update_progress(completed, total):
-            rich_progress.update(validation_task, completed=completed)
+            dashboard.update_stage('validation', completed, f"{completed}/{total} videos")
 
         # Preprocess all videos
         conc = (config.get('concurrency') or {})
@@ -241,13 +333,19 @@ def main():
             progress_callback=update_progress
         )
 
-    # Get and display statistics
-    total_validated, repaired_count, original_count = get_validation_stats(path_mapping)
+        # Get and display statistics
+        total_validated, repaired_count, original_count = get_validation_stats(path_mapping)
+        dashboard.complete_stage('validation', f"{repaired_count} repaired, {original_count} original")
+
     print(f"\n✓ Validation complete:")
     print(f"  • {total_validated} videos processed")
     print(f"  • {repaired_count} repaired/cached")
     print(f"  • {original_count} used as-is")
     print(f"\n{'='*80}\n")
+
+    logger.info(f"Validation complete: {total_validated} processed, {repaired_count} repaired, {original_count} original")
+    pipeline_logger.log_stage_end("Video Validation & Repair", 0, success=True,
+                                  details=f"{repaired_count} repaired, {original_count} original")
 
     # Apply path mapping to all video groups
     for group in video_groups:
@@ -255,9 +353,6 @@ def main():
             original_path = clip['full_path']
             if original_path in path_mapping:
                 clip['full_path'] = path_mapping[original_path]
-
-    # Initialize progress tracker
-    progress = ProgressTracker(total_groups=len(video_groups), total_clips=total_clips)
 
     # Build group jobs
     group_jobs: List[Tuple[str, List[str], Dict[str, Any]]] = []
@@ -269,7 +364,6 @@ def main():
     for group in video_groups:
         group_name = _generate_group_name(group)
         video_paths = [v['full_path'] for v in group]
-        progress.log_group_queued(group_name, len(video_paths))
         group_jobs.append((group_name, video_paths, config))
 
     # Concurrency settings
@@ -278,79 +372,77 @@ def main():
     transcribe_workers = int(conc.get('transcription_workers', max(1, min(2, default_cpu))))
     merge_workers = int(conc.get('merge_workers', max(1, min(3, default_cpu))))
 
-    # --- STAGE 3: Transcription & Diarization (concurrent per group) ---
-    progress.start_stage(3, len(group_jobs))
-    stage3_results: Dict[str, Tuple[List[str], Optional[Dict[str, Any]]]] = {}
-    completed_count = 0
+    # Continue with full pipeline using dashboard
+    with dashboard:
+        # --- STAGE 3: Transcription & Diarization (concurrent per group) ---
+        pipeline_logger.log_stage_start("Transcription & Diarization", 3,
+                                       f"{len(group_jobs)} groups, {transcribe_workers} workers")
+        stage3_results: Dict[str, Tuple[List[str], Optional[Dict[str, Any]]]] = {}
+        completed_count = 0
 
-    # Check for existing transcripts to enable resume functionality
-    existing_transcripts = set()
-    if os.path.exists(transcripts_dir):
-        existing_transcripts = {f.replace('_transcript.txt', '') for f in os.listdir(transcripts_dir) if f.endswith('_transcript.txt')}
+        # Check for existing transcripts to enable resume functionality
+        existing_transcripts = set()
+        if os.path.exists(transcripts_dir):
+            existing_transcripts = {f.replace('_transcript.txt', '') for f in os.listdir(transcripts_dir) if f.endswith('_transcript.txt')}
 
-    # Filter out groups that already have transcripts
-    jobs_to_process = []
-    for job in group_jobs:
-        group_name = job[0]
-        if group_name in existing_transcripts:
-            progress.log_info(f"Skipping {group_name} - transcript already exists")
-            # For skipped groups, we still need processed paths for Stage 5
-            # We'll derive them from the original video paths
-            video_paths = job[1]
-            stage3_results[group_name] = (video_paths, None)
-            completed_count += 1
+        if existing_transcripts:
+            logger.info(f"Resuming: {len(existing_transcripts)} groups already transcribed")
+
+        # Filter out groups that already have transcripts
+        jobs_to_process = []
+        for job in group_jobs:
+            group_name = job[0]
+            if group_name in existing_transcripts:
+                # For skipped groups, we still need processed paths for Stage 5
+                video_paths = job[1]
+                stage3_results[group_name] = (video_paths, None)
+                completed_count += 1
+            else:
+                jobs_to_process.append(job)
+
+        if len(existing_transcripts) > 0:
+            dashboard.stages['transcription'].details = f"Resuming: {len(existing_transcripts)} already complete"
+
+        dashboard.start_stage('transcription', len(group_jobs))
+
+        if not jobs_to_process:
+            dashboard.skip_stage('transcription', "All groups already transcribed")
         else:
-            jobs_to_process.append(job)
-
-    if jobs_to_process:
-        progress.log_info(f"Processing {len(jobs_to_process)} groups (skipped {len(group_jobs) - len(jobs_to_process)} existing)")
-    else:
-        progress.log_info("All groups already transcribed - skipping Stage 3")
-        progress.complete_stage(3, completed_count)
-
-    if jobs_to_process:
-        try:
-            with multiprocessing.Manager() as manager:
-                _progress = manager.dict()
-
-                with progress.create_progress() as rich_progress:
-                    overall_task = rich_progress.add_task(
-                        "[cyan]Overall transcription progress",
-                        total=len(jobs_to_process)
-                    )
+            try:
+                with multiprocessing.Manager() as manager:
+                    _progress = manager.dict()
 
                     with ProcessPoolExecutor(max_workers=transcribe_workers) as executor:
                         # Submit all jobs with progress tracking
                         futures = {}
                         for job_idx, job in enumerate(jobs_to_process):
                             group_name = job[0]
-                            task_id = rich_progress.add_task(
-                                f"[green]{group_name}",
-                                total=1,
-                                visible=False
-                            )
+                            video_paths = job[1]
+
+                            # Add substage for each group
+                            dashboard.add_substage('transcription', group_name, len(video_paths))
+
+                            task_id = f"transcription_{group_name}"
                             job_with_progress = (job[0], job[1], job[2], _progress, task_id)
                             futures[executor.submit(_transcribe_group_job, job_with_progress)] = (group_name, task_id)
 
                         # Monitor progress
-                        while (n_finished := sum([future.done() for future in futures])) < len(futures):
-                            rich_progress.update(overall_task, completed=n_finished)
+                        while True:
+                            n_finished = sum([future.done() for future in futures])
+                            dashboard.update_stage('transcription', completed_count + n_finished,
+                                                 f"Processing {n_finished}/{len(jobs_to_process)} groups")
 
-                            # Update individual task progress from shared dict
+                            # Update individual group progress from shared dict
                             for task_id, update_data in _progress.items():
-                                if isinstance(update_data, dict):
+                                if isinstance(update_data, dict) and task_id.startswith('transcription_'):
+                                    group_name = task_id.replace('transcription_', '')
                                     latest = update_data.get("progress", 0)
-                                    total = update_data.get("total", 1)
-                                    visible = update_data.get("visible", False)
-                                    rich_progress.update(
-                                        task_id,
-                                        completed=latest,
-                                        total=total,
-                                        visible=visible
-                                    )
+                                    dashboard.update_substage('transcription', group_name, latest)
 
-                        # Final update
-                        rich_progress.update(overall_task, completed=len(futures))
+                            if n_finished >= len(futures):
+                                break
+
+                            time.sleep(0.1)
 
                         # Collect results
                         for fut, (group_name, task_id) in futures.items():
@@ -358,178 +450,193 @@ def main():
                                 gname, processed_video_paths, diarization_result = fut.result()
                                 stage3_results[gname] = (processed_video_paths, diarization_result)
                                 completed_count += 1
+                                dashboard.remove_substage('transcription', gname)
                             except Exception as exc:
                                 stage3_results[group_name] = ([], None)
                                 completed_count += 1
-                                progress.log_error(f"Transcription failed for {group_name}: {exc}")
+                                dashboard.remove_substage('transcription', group_name)
+                                logger.error(f"Transcription failed for {group_name}: {exc}")
 
-            progress.complete_stage(3, completed_count)
+                dashboard.complete_stage('transcription', f"{completed_count} groups processed")
+                pipeline_logger.log_stage_end("Transcription & Diarization", 3, success=True,
+                                            details=f"{completed_count} groups processed")
 
-        except KeyboardInterrupt:
-            progress.log_warning("SIGINT received: cancelling transcription workers...")
-            raise
+            except KeyboardInterrupt:
+                logger.warning("SIGINT received: cancelling transcription workers...")
+                pipeline_logger.log_stage_end("Transcription & Diarization", 3, success=False,
+                                            details="Interrupted by user")
+                raise
 
-    # --- STAGE 4: Speaker Identification (serial; shared state) ---
-    # Count groups with speech for progress tracking
-    groups_with_speech = sum(1 for _, diar_result in stage3_results.values() if diar_result and diar_result.get('segments'))
+        # --- STAGE 4: Speaker Identification (serial; shared state) ---
+        # Count groups with speech for progress tracking
+        groups_with_speech = sum(1 for _, diar_result in stage3_results.values() if diar_result and diar_result.get('segments'))
 
-    progress.start_stage(4, groups_with_speech if groups_with_speech > 0 else len(video_groups))
-    speaker_identifier = SpeakerIdentifier(config)
-    speaker_id_completed = 0
+        pipeline_logger.log_stage_start("Speaker Identification", 4,
+                                       f"{groups_with_speech} groups with speech")
 
-    for group in video_groups:
-        group_name = _generate_group_name(group)
-        processed_video_paths, diarization_result = stage3_results.get(group_name, ([], None))
-        if diarization_result and diarization_result.get('segments'):
-            speaker_identifier.process_transcript(
-                diarization_result['segments'], diarization_result.get('timeline', [])
-            )
-            final_transcript = speaker_identifier.substitute_names_in_transcript(
-                diarization_result['segments']
-            )
-            transcript_filename = f"{group_name}_transcript.txt"
-            transcript_path = os.path.join(transcripts_dir, transcript_filename)
-            with open(transcript_path, 'w') as f:
-                for entry in final_transcript:
-                    f.write(f"[{_format_hms(entry['start'])}-{_format_hms(entry['end'])}] {entry['speaker']}: {entry['text']}\n")
-            speaker_id_completed += 1
-            progress.update_stage_progress(4, speaker_id_completed, f"Processed: {group_name}")
+        dashboard.start_stage('speaker_id', groups_with_speech if groups_with_speech > 0 else len(video_groups))
+        speaker_identifier = SpeakerIdentifier(config)
+        speaker_id_completed = 0
+
+        for group in video_groups:
+            group_name = _generate_group_name(group)
+            processed_video_paths, diarization_result = stage3_results.get(group_name, ([], None))
+            if diarization_result and diarization_result.get('segments'):
+                speaker_identifier.process_transcript(
+                    diarization_result['segments'], diarization_result.get('timeline', [])
+                )
+                final_transcript = speaker_identifier.substitute_names_in_transcript(
+                    diarization_result['segments']
+                )
+                transcript_filename = f"{group_name}_transcript.txt"
+                transcript_path = os.path.join(transcripts_dir, transcript_filename)
+                with open(transcript_path, 'w') as f:
+                    for entry in final_transcript:
+                        speaker = entry.get('speaker', 'Unknown')
+                        text = entry.get('text', '')
+                        f.write(f"{speaker}: {text}\n")
+                speaker_id_completed += 1
+                dashboard.update_stage('speaker_id', speaker_id_completed, f"Processed: {group_name}")
+            else:
+                speaker_id_completed += 1
+                dashboard.update_stage('speaker_id', speaker_id_completed, f"Skipped (no speech): {group_name}")
+
+        dashboard.complete_stage('speaker_id', f"{speaker_id_completed} groups processed")
+        logger.info(f"Speaker identification complete: {speaker_id_completed} groups processed")
+        pipeline_logger.log_stage_end("Speaker Identification", 4, success=True,
+                                     details=f"{speaker_id_completed} groups processed")
+
+        # --- STAGE 5: Video Merging/Composition (concurrent per group) ---
+        merge_jobs: List[Tuple[str, List[Dict[str, Any]], str, Dict[str, Any], Optional[Dict[str, Any]]]] = []
+
+        # Check for existing merged videos to enable resume functionality
+        existing_videos = set()
+        if os.path.exists(group_outputs_dir):
+            existing_videos = {f.replace('_merged.mp4', '') for f in os.listdir(group_outputs_dir) if f.endswith('_merged.mp4')}
+
+        for group in video_groups:
+            group_name = _generate_group_name(group)
+            processed_video_paths, diarization_result = stage3_results.get(group_name, ([], None))
+
+            # Skip if merged video already exists
+            if group_name in existing_videos:
+                continue
+
+            # Create enriched clip dictionaries for composition
+            video_clips_for_merge = []
+            if processed_video_paths:
+                # Map processed paths back to original clips to preserve metadata
+                for i, clip in enumerate(group):
+                    clip_dict = dict(clip)  # Create a copy
+                    # Use processed path if available, otherwise use original
+                    if i < len(processed_video_paths):
+                        clip_dict['path'] = processed_video_paths[i]
+                    video_clips_for_merge.append(clip_dict)
+            else:
+                # No processed paths, use original group clips
+                video_clips_for_merge = [dict(clip) for clip in group]
+
+            if not video_clips_for_merge:
+                continue
+
+            output_video_filename = f"{group_name}_merged.mp4"
+            output_video_path = os.path.join(group_outputs_dir, output_video_filename)
+            merge_jobs.append((group_name, video_clips_for_merge, output_video_path, config, diarization_result))
+
+        pipeline_logger.log_stage_start("Video Merging/Composition", 5,
+                                       f"{len(merge_jobs)} groups to merge, {merge_workers} workers")
+
+        dashboard.start_stage('merge', len(merge_jobs) + len(existing_videos))
+        merge_success_count = len(existing_videos)  # Count existing videos as successes
+        merge_completed = len(existing_videos)
+
+        if len(existing_videos) > 0:
+            dashboard.stages['merge'].details = f"Resuming: {len(existing_videos)} already complete"
+            logger.info(f"Resuming merge: {len(existing_videos)} groups already merged")
+
+        if not merge_jobs:
+            dashboard.skip_stage('merge', "All videos already merged")
         else:
-            speaker_id_completed += 1
-            progress.update_stage_progress(4, speaker_id_completed, f"Skipped (no speech): {group_name}")
-
-    progress.complete_stage(4, speaker_id_completed)
-
-    # --- STAGE 5: Video Merging/Composition (concurrent per group) ---
-    merge_jobs: List[Tuple[str, List[Dict[str, Any]], str, Dict[str, Any]]] = []
-
-    # Check for existing merged videos to enable resume functionality
-    existing_videos = set()
-    if os.path.exists(group_outputs_dir):
-        existing_videos = {f.replace('_merged.mp4', '') for f in os.listdir(group_outputs_dir) if f.endswith('_merged.mp4')}
-
-    for group in video_groups:
-        group_name = _generate_group_name(group)
-        processed_video_paths, _ = stage3_results.get(group_name, ([], None))
-
-        # Skip if merged video already exists
-        if group_name in existing_videos:
-            progress.log_info(f"Skipping {group_name} - merged video already exists")
-            continue
-
-        # Create enriched clip dictionaries for composition
-        # If we have processed paths from stage 3 (repaired videos), use those
-        # Otherwise use original paths from the group
-        video_clips_for_merge = []
-        if processed_video_paths:
-            # Map processed paths back to original clips to preserve metadata
-            for i, clip in enumerate(group):
-                clip_dict = dict(clip)  # Create a copy
-                # Use processed path if available, otherwise use original
-                if i < len(processed_video_paths):
-                    clip_dict['path'] = processed_video_paths[i]
-                video_clips_for_merge.append(clip_dict)
-        else:
-            # No processed paths, use original group clips
-            video_clips_for_merge = [dict(clip) for clip in group]
-
-        if not video_clips_for_merge:
-            continue
-
-        output_video_filename = f"{group_name}_merged.mp4"
-        output_video_path = os.path.join(group_outputs_dir, output_video_filename)
-        merge_jobs.append((group_name, video_clips_for_merge, output_video_path, config))
-
-    progress.start_stage(5, len(merge_jobs) + len(existing_videos))
-    merge_success_count = len(existing_videos)  # Count existing videos as successes
-    merge_completed = len(existing_videos)
-
-    if merge_jobs:
-        progress.log_info(f"Processing {len(merge_jobs)} groups (skipped {len(existing_videos)} existing)")
-    else:
-        progress.log_info("All videos already merged - skipping Stage 5")
-        progress.complete_stage(5, merge_success_count)
-
-    if merge_jobs:
-        try:
-            with multiprocessing.Manager() as manager:
-                _progress = manager.dict()
-
-                with progress.create_progress() as rich_progress:
-                    overall_task = rich_progress.add_task(
-                        "[cyan]Overall merge progress",
-                        total=len(merge_jobs)
-                    )
+            try:
+                with multiprocessing.Manager() as manager:
+                    _progress = manager.dict()
 
                     with ProcessPoolExecutor(max_workers=merge_workers) as executor:
                         # Submit all jobs with progress tracking
                         futures = {}
                         for job in merge_jobs:
                             group_name = job[0]
-                            task_id = rich_progress.add_task(
-                                f"[magenta]{group_name}",
-                                total=1,
-                                visible=False
-                            )
-                            job_with_progress = (job[0], job[1], job[2], job[3], _progress, task_id)
+                            video_clips = job[1]  # List of clip dicts
+
+                            # Add substage showing number of clips in this group
+                            dashboard.add_substage('merge', group_name, len(video_clips))
+
+                            task_id = f"merge_{group_name}"
+                            job_with_progress = (job[0], job[1], job[2], job[3], job[4], _progress, task_id)
                             futures[executor.submit(_merge_group_job, job_with_progress)] = (group_name, task_id)
 
                         # Monitor progress
-                        while (n_finished := sum([future.done() for future in futures])) < len(futures):
-                            rich_progress.update(overall_task, completed=n_finished)
+                        while True:
+                            n_finished = sum([future.done() for future in futures])
+                            dashboard.update_stage('merge', merge_completed + n_finished,
+                                                 f"Merging {n_finished}/{len(merge_jobs)} groups")
 
-                            # Update individual task progress from shared dict
+                            # Update individual group progress from shared dict
                             for task_id, update_data in _progress.items():
-                                if isinstance(update_data, dict):
+                                if isinstance(update_data, dict) and task_id.startswith('merge_'):
+                                    group_name = task_id.replace('merge_', '')
                                     latest = update_data.get("progress", 0)
-                                    total = update_data.get("total", 1)
-                                    visible = update_data.get("visible", False)
-                                    rich_progress.update(
-                                        task_id,
-                                        completed=latest,
-                                        total=total,
-                                        visible=visible
-                                    )
+                                    dashboard.update_substage('merge', group_name, latest)
 
-                        # Final update
-                        rich_progress.update(overall_task, completed=len(futures))
+                            if n_finished >= len(futures):
+                                break
+
+                            time.sleep(0.1)
 
                         # Collect results
                         for fut, (group_name, task_id) in futures.items():
                             try:
                                 gname, ok, out_path = fut.result()
-                                merge_completed += 1
                                 if ok:
                                     merge_success_count += 1
                                 else:
-                                    progress.log_warning(f"Merge failed for {gname}")
+                                    logger.warning(f"Merge failed for {gname}")
+                                merge_completed += 1
+                                dashboard.remove_substage('merge', gname)
                             except Exception as exc:
                                 merge_completed += 1
-                                progress.log_error(f"Merge error for {group_name}: {exc}")
+                                dashboard.remove_substage('merge', group_name)
+                                logger.error(f"Merge error for {group_name}: {exc}")
 
-            progress.complete_stage(5, merge_success_count)
+                dashboard.complete_stage('merge', f"{merge_success_count} groups merged")
+                logger.info(f"Merge complete: {merge_success_count}/{merge_completed} groups successful")
+                pipeline_logger.log_stage_end("Video Merging/Composition", 5, success=True,
+                                            details=f"{merge_success_count} groups merged")
 
-        except KeyboardInterrupt:
-            progress.log_warning("SIGINT received: cancelling merge workers...")
-            raise
+            except KeyboardInterrupt:
+                logger.warning("SIGINT received: cancelling merge workers...")
+                pipeline_logger.log_stage_end("Video Merging/Composition", 5, success=False,
+                                            details="Interrupted by user")
+                raise
 
-    # --- FINAL SUMMARY ---
+    # Dashboard context manager closes here, printing final summary
+    dashboard.print_summary()
+
+    # --- FINAL OUTPUT LOCATIONS ---
     output_dir = config['paths']['output_dir']
     transcripts_dir = os.path.join(output_dir, config['paths']['transcripts_dir'])
     videos_dir = os.path.join(output_dir, config['paths']['videos_dir'])
     speakers_dir = os.path.join(output_dir, config['paths']['speakers_dir'])
-
-    transcript_files = [f for f in os.listdir(transcripts_dir) if f.endswith('.txt')] if os.path.exists(transcripts_dir) else []
-    video_files = [f for f in os.listdir(videos_dir) if f.endswith('.mp4')] if os.path.exists(videos_dir) else []
-    speaker_files = [f for f in os.listdir(speakers_dir) if f.endswith('.wav')] if os.path.exists(speakers_dir) else []
-
-    progress.print_summary(len(transcript_files), len(video_files), len(speaker_files))
 
     print(f"📂 Output locations:")
     print(f"   • Transcripts: {transcripts_dir}")
     print(f"   • Videos: {videos_dir}")
     print(f"   • Speaker samples: {speakers_dir}")
     print(f"\n{'='*80}\n")
+
+    logger.info("Pipeline execution completed successfully")
+    logger.info(f"Output directories: transcripts={transcripts_dir}, videos={videos_dir}, speakers={speakers_dir}")
+    pipeline_logger.log_session_end(success=True)
 
 if __name__ == '__main__':
     main()

@@ -224,6 +224,7 @@ class MultiCameraComposer:
         output_path: str,
         speech_segments: Optional[List[Dict[str, Any]]] = None,
         speech_timeline: Optional[List[Dict[str, Any]]] = None,
+        progress_callback: Optional[callable] = None,
     ) -> bool:
         """
         Create a composite video from multiple camera angles of the same event.
@@ -233,6 +234,7 @@ class MultiCameraComposer:
             output_path: Path where the final composite video will be saved
             speech_segments: Optional diarization segments with start/end times (seconds)
             speech_timeline: Optional clip timeline produced during transcription
+            progress_callback: Optional callback function(current, total) for progress updates
 
         Returns:
             bool: True if composition succeeded, False otherwise
@@ -240,23 +242,42 @@ class MultiCameraComposer:
         # If only one clip or composition disabled, use simple merge
         if len(video_clips) == 1 or not self.enable_composition:
             logging.info(f"Single camera or composition disabled, using simple copy")
-            return self._simple_copy(video_clips, output_path)
+            result = self._simple_copy(video_clips, output_path)
+            if progress_callback:
+                progress_callback(len(video_clips), len(video_clips))  # Report completion
+            return result
 
         # Check if all clips are from the same camera (shouldn't happen with new grouping)
         cameras = set(clip['camera'] for clip in video_clips)
         if len(cameras) == 1:
             logging.info(f"All clips from same camera ({cameras.pop()}), using sequential merge")
-            return self._sequential_merge(video_clips, output_path)
+            result = self._sequential_merge(video_clips, output_path)
+            if progress_callback:
+                progress_callback(len(video_clips), len(video_clips))  # Report completion
+            return result
 
         logging.info(f"Composing multi-camera event from {len(video_clips)} clips across {len(cameras)} cameras")
 
+        # Calculate total steps for progress tracking
+        total_steps = len(video_clips)
+        
+        def _report_progress(completed: int):
+            """Helper to report progress if callback provided."""
+            if progress_callback:
+                try:
+                    progress_callback(completed, total_steps)
+                except Exception as e:
+                    logging.warning(f"Progress callback error: {e}")
+
         try:
-            # Step 1: Analyze audio quality for each clip and capture event start
+            # Step 1: Analyze audio quality for each clip and capture event start (20% of work)
+            _report_progress(int(total_steps * 0.0))
             camera_clips = self._analyze_clips(video_clips)
             self._load_speech_segments(speech_segments, speech_timeline, camera_clips)
             self._review_segments = []
+            _report_progress(int(total_steps * 0.2))
 
-            # Step 1b: Estimate per-camera fine alignment offsets and adjust timings
+            # Step 1b: Estimate per-camera fine alignment offsets and adjust timings (10% of work)
             if self._alignment_enabled:
                 try:
                     ref_clip = max(camera_clips, key=lambda x: x.audio_quality_score)
@@ -285,13 +306,16 @@ class MultiCameraComposer:
                             logging.info("Estimated alignment drifts (s/s): %s", json.dumps(self._alignment_drifts))
                 except Exception as e:
                     logging.warning("Audio alignment estimation failed, continuing without it: %s", e)
+            _report_progress(int(total_steps * 0.3))
 
-            # Step 2: Generate overlap-aligned timelines for video and audio across the full event
+            # Step 2: Generate overlap-aligned timelines for video and audio across the full event (10% of work)
             video_timeline, audio_timeline = self._generate_aligned_timelines(camera_clips)
             self._review_segments = self._extract_review_segments(video_timeline)
+            _report_progress(int(total_steps * 0.4))
 
-            # Step 3: Create the composite video using ffmpeg
+            # Step 3: Create the composite video using ffmpeg (60% of work)
             success = self._create_composite_video(video_timeline, audio_timeline, output_path)
+            _report_progress(total_steps)  # 100% complete
 
             if success:
                 logging.info(f"Successfully composed multi-camera event to {output_path}")
@@ -302,7 +326,10 @@ class MultiCameraComposer:
             logging.error(f"Failed to compose multi-camera event: {e}")
             # Fallback to simple merge on error
             logging.info("Falling back to sequential merge")
-            return self._sequential_merge(video_clips, output_path)
+            result = self._sequential_merge(video_clips, output_path)
+            if progress_callback:
+                progress_callback(total_steps, total_steps)  # Report completion even on fallback
+            return result
 
     def _analyze_clips(self, video_clips: List[Dict[str, Any]]) -> List[CameraClip]:
         """

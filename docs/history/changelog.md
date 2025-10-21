@@ -4,6 +4,14 @@ This changelog captures the major feature batches that shaped the current
 pipeline. For granular implementation details refer to git history or the
 linked component docs.
 
+## 2025-10-21 — Dashboard Progress Callback Fix
+
+- Added `progress_callback` parameter to `MultiCameraComposer.compose_multi_camera_event()` to enable real-time progress reporting during composition.
+- Progress callback reports completion at key milestones: clip analysis (20%), alignment (30%), timeline generation (40%), and video creation (100%).
+- Updated merge worker in orchestrator to pass progress callback that updates the shared multiprocessing dict.
+- Fixed dashboard substage display to show incremental progress instead of staying at 0% until completion.
+- Fallback paths (`_simple_copy`, `_sequential_merge`) also report completion when progress callback is provided.
+
 ## 2025-10-21 — Robust Multi-Window Audio Alignment & Stitching
 
 - Replaced single-window cross-correlation with multi-window GCC-PHAT time delay
