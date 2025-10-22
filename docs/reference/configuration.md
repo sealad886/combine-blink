@@ -68,12 +68,15 @@ grouping:
 ```yaml
 multi_camera_composition:
   enable_composition: true
-  switching_strategy: audio_quality   # time_based | round_robin | audio_quality
+  # time_based | round_robin | audio_quality | speech_people
+  switching_strategy: speech_people
   switching_interval: 5.0
-  transition_style: crossfade         # cut | crossfade
+  transition_style: crossfade     # cut | crossfade
   transition_duration: 0.28
-  audio_source: best_quality          # best_quality | first | longest
-  audio_crossfade_seconds: 0.06       # crossfade between audio segments
+  audio_source: best_quality      # best_quality | first | longest
+  audio_crossfade_seconds: 0.06   # crossfade between audio segments
+
+  # Fine audio alignment (GCC-PHAT multi-window) with optional drift estimation
   audio_alignment:
     enabled: true
     max_shift_seconds: 1.0
@@ -84,6 +87,16 @@ multi_camera_composition:
     highpass_hz: 300
     lowpass_hz: 3000
     estimate_drift: true
+
+  # People detection for silent segments (Hugging Face Transformers, no OpenCV)
+  people_detection:
+    enabled: true
+    model_name: hustvl/yolos-tiny   # or facebook/detr-resnet-50
+    revision: null                  # set to "no_timm" for DETR to avoid timm
+    score_threshold: 0.7
+    min_count: 1
+
+  # Burn timestamp and review markers via ASS subtitles
   timestamp_overlay:
     enabled: true
     font: Arial
@@ -91,14 +104,25 @@ multi_camera_composition:
     margin_v: 20
     margin_r: 20
     dst_offset_hours: 1
+
+  # Performance and encoding options
+  single_pass_filter_complex: true  # One-shot ffmpeg composition (faster)
+  encoding:
+    use_hw_encode: false            # Enable hardware encode (videotoolbox/qsv/amf/nvenc)
+    hw_codec: libx264     # Used when use_hw_encode is true
+    x264_preset: veryfast           # Software encode preset
+    x264_crf: '22'                  # Software encode quality
+    bitrate: 6000k                  # Hardware encode target bitrate
 ```
 
-- `switching_strategy`: how to choose which camera is visible (`audio_quality`
-  prefers the best audio score).
+- `switching_strategy`: `speech_people` anchors on speech; during silence, pick angle with more people and mark review.
 - `transition_style` + `transition_duration`: control video transitions.
-- `audio_alignment`: per-camera fine alignment using multi-window GCC‑PHAT with optional drift.
+- `audio_alignment`: per-clip base offset using multi-window GCC‑PHAT; optional slow drift correction.
 - `audio_crossfade_seconds`: triangular crossfade between consecutive audio segments.
-- `timestamp_overlay`: burn-in overlay with DST correction (requires system fonts).
+- `people_detection`: uses Hugging Face detectors (YOLOS/DETR). Configure `model_name`/`revision` and `score_threshold`.
+- `timestamp_overlay`: burn-in overlay with DST correction; review flags inserted for silent stretches where angle choice is ambiguous.
+- `single_pass_filter_complex`: build the composite in a single ffmpeg call; falls back to multi-step pipeline on error.
+- `encoding`: choose hardware/software encoder and rate control. Hardware encoders typically honor `bitrate`; libx264 uses `preset`/`crf`.
 
 ---
 

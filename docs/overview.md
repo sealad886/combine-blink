@@ -76,8 +76,12 @@ Implemented in `src/media_validation.py` and initiated right after grouping.
   resume.
 - With multiple cameras *and* `multi_camera_composition.enable_composition`:
   - `MultiCameraComposer.compose_multi_camera_event` performs quality analysis,
-    optional per-camera alignment, switching timeline generation, timestamp
-    overlay, and final ffmpeg synthesis.
+    optional per-camera alignment, switching timeline generation (supports
+    `speech_people` using a Hugging Face people detector), timestamp overlay,
+    and final ffmpeg synthesis. By default, synthesis uses a single-pass
+    `-filter_complex` graph for better performance and falls back to a
+    multi-step pipeline if needed. Hardware encoders can be enabled via
+    `multi_camera_composition.encoding`.
 - Single-camera or disabled composition falls back to `merge_video_clips`
   (sequential merge with configurable crossfades).
 

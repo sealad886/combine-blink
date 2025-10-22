@@ -1,0 +1,16 @@
+diff --git a/config.yaml b/config.yaml
+--- a/config.yaml
++++ b/config.yaml
+@@
+   encoding:
+-    # MPS optimization: Use VideoToolbox hardware encoding on macOS for ~5-10x faster encoding
+-    # with excellent quality. Falls back to software if hardware encoder unavailable.
+-    use_hw_encode: true         # Enable hardware encoding on macOS (libx264)
+-    hw_codec: libx264 # VideoToolbox for Apple Silicon/Intel Macs
++    # MPS optimization: Use VideoToolbox hardware encoding on macOS for ~5–10× faster encoding
++    # with excellent quality. Falls back to software if hardware encoder unavailable.
++    use_hw_encode: true         # Enable hardware encoding on macOS (VideoToolbox)
++    hw_codec: h264_videotoolbox # VideoToolbox hardware encoder (Apple Silicon/Intel Macs)
+     x264_preset: faster
+     x264_crf: '20'
+     bitrate: 8000k

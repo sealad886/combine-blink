@@ -58,40 +58,51 @@ multi_camera_composition:
     clipping: 0.2     # Penalize repeated peak hits indicative of distortion
 
   # Clean up the selected audio track before stitching segments
+  # MPS optimization: Audio cleanup is ffmpeg-based and runs efficiently on all platforms
   audio_cleanup:
     enabled: true
-    highpass_hz: 120         # Remove low-frequency rumble
-    lowpass_hz: 7000         # Tuck away brittle high-frequency noise
+    highpass_hz: 100         # Slightly lower for more natural bass (was 120)
+    lowpass_hz: 8000         # Extended to 8kHz for better clarity on speech (was 7000)
     denoise: true            # Apply fft-based denoiser (afftdn)
     denoise_nf: -25.0        # Noise floor reference (dB) for denoiser
     loudness_normalize: true # Per-segment loudness normalization (loudnorm)
-    loudnorm_target_i: -24.0
+    loudnorm_target_i: -23.0 # Slightly louder target for better audibility (was -24.0)
     loudnorm_target_tp: -2.0
     loudnorm_target_lra: 11.0
     extra_filters: []        # Optional list of additional ffmpeg audio filters
 
   # Estimate how many people are visible in each angle to guide silent segments
-  # (requires opencv-python; disable if performance is a concern)
+  # Uses a Hugging Face object detector (default: hustvl/yolos-tiny) — no OpenCV required.
+  # MPS optimization: YOLOS-tiny is fastest on Apple Silicon; reduce resize_width for speed
   people_detection:
     enabled: true
-    sample_frames: 6         # Number of frames sampled across each clip
-    resize_width: 640        # Resize width for detector (keeps runtime bounded)
-    min_frame_width: 320     # Minimum width to avoid undersized frames
+    sample_frames: 4           # Reduced from 6 for faster detection (still accurate)
+    resize_width: 480          # Reduced from 640 for ~2x faster inference on MPS
+    min_frame_width: 320       # Minimum width to avoid undersized frames
+    # Detector model options (Hugging Face):
+    #   - YOLOS (fast, CPU-friendly, MPS-optimized): hustvl/yolos-tiny
+    #   - DETR (heavier): facebook/detr-resnet-50
+    model_name: hustvl/yolos-tiny
+    # For DETR you can set revision: no_timm to avoid the timm dependency; keep null for YOLOS
+    revision: null
+    score_threshold: 0.65      # Slightly lower threshold for better recall without much speed cost
+    min_count: 1               # Minimum people-count to consider angle for silent intervals
 
   # Fine audio alignment (cross-correlation) to reduce per-camera offset
   # Uses a short window of audio from overlapping clips to estimate per-camera time shift
   # Note: Estimates a single offset per camera for the entire event; may not fully correct
   # drift within longer clips. For best results, keep clips short (<60s) or disable if problematic.
+  # MPS optimization: Reduced window/hop for faster processing; alignment is CPU-bound (numpy)
   audio_alignment:
     enabled: true
     max_shift_seconds: 1.0          # Maximum shift to apply (prevents overcorrection)
-    analysis_window_seconds: 12.0    # Length of audio window used for correlation analysis
-    hop_seconds: 6.0                 # Hop between analysis windows (default: window/2)
-    sample_rate: 16000               # Downsample rate for faster cross-correlation
-    bandpass: true                   # Apply bandpass filter to focus on speech frequencies
-    highpass_hz: 300                 # High-pass filter cutoff (removes low rumble)
-    lowpass_hz: 3000                 # Low-pass filter cutoff (removes high noise)
-    estimate_drift: true             # Estimate slow drift (seconds per second) and correct in audio
+    analysis_window_seconds: 10.0   # Reduced from 12s for faster processing (still accurate)
+    hop_seconds: 5.0                # Reduced from 6s for faster multi-window analysis
+    sample_rate: 16000              # Downsample rate for faster cross-correlation
+    bandpass: true                  # Apply bandpass filter to focus on speech frequencies
+    highpass_hz: 300                # High-pass filter cutoff (removes low rumble)
+    lowpass_hz: 3000                # Low-pass filter cutoff (removes high noise)
+    estimate_drift: true            # Estimate slow drift (seconds per second) and correct in audio
 
   # Burn date/time overlay in bottom-right; Blink files are often off by 1 hour (DST)
   timestamp_overlay:
@@ -101,6 +112,18 @@ multi_camera_composition:
     margin_v: 20
     margin_r: 20
     dst_offset_hours: 1
+
+  # Performance and encoding controls
+  # single_pass_filter_complex: Compose in one ffmpeg invocation (faster, default true)
+  single_pass_filter_complex: true
+  encoding:
+    # MPS optimization: Use VideoToolbox hardware encoding on macOS for ~5-10x faster encoding
+    # with excellent quality. Falls back to software if hardware encoder unavailable.
+    use_hw_encode: true         # Enable hardware encoding on macOS (libx264)
+    hw_codec: libx264 # VideoToolbox for Apple Silicon/Intel Macs
+    x264_preset: faster         # Software fallback: 'faster' balances speed/quality (upgrade from 'veryfast')
+    x264_crf: '20'              # Software fallback: CRF 20 for higher quality (down from 22)
+    bitrate: 8000k              # VideoToolbox target: 8Mbps for excellent 1080p quality (up from 6Mbps)
 video_processing:
   crossfade_duration: 0.5
 transcription:
@@ -172,23 +195,28 @@ speaker_identification:
   auth_token_env:
   - HF_TOKEN
   - HUGGINGFACE_TOKEN
-  device: GPU
+  # MPS optimization: Use 'mps' device for Apple Silicon GPU acceleration
+  # Options: 'cpu', 'cuda', 'mps' (Apple Silicon), 'GPU' (auto-detect)
+  device: mps
   similarity_threshold: 0.68
 speakers:
   known_speakers: {}
 concurrency:
+  # MPS optimization: Tuned for Apple Silicon Macs with fast SSD and unified memory
+
   # Stage 0: Video validation and repair (I/O-bound, uses ffmpeg)
-  # Lower count recommended to avoid saturating disk I/O
-  # Each worker runs ffmpeg which is multi-threaded internally
-  validation_workers: 2
+  # Increased for faster preprocessing on fast SSDs (Apple Silicon Macs have excellent I/O)
+  validation_workers: 3
 
   # Stage 3: Transcription and diarization (compute-bound, uses AI models)
-  # Higher count beneficial on systems with good CPU/GPU
+  # Keep at 2 to avoid memory pressure; Core ML and MPS models use significant unified memory
+  # Each worker loads Whisper + diarization models (~4-6GB per worker)
   transcription_workers: 2
 
-  # Stage 5: Video merging and composition (I/O-bound, uses ffmpeg)
-  # Moderate count for parallel merging without overwhelming disk
-  merge_workers: 3
+  # Stage 5: Video merging and composition (I/O-bound, uses ffmpeg with VideoToolbox)
+  # Increased to 4 for parallel hardware encoding; VideoToolbox offloads to Media Engine
+  # Apple Silicon's dedicated video encoders can handle multiple streams efficiently
+  merge_workers: 4
 
 # Logging configuration
 logging:

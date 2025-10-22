@@ -277,3 +277,118 @@ def estimate_offsets_and_drift(
             drifts[cam] = 0.0
 
     return offsets, drifts
+
+
+def estimate_per_clip_offsets(
+    camera_clips: Iterable[ClipLike],
+    ref_camera: str,
+    *,
+    sample_rate: int = 16000,
+    window_seconds: float = 12.0,
+    hop_seconds: Optional[float] = None,
+    max_shift_seconds: float = 1.0,
+    bandpass: bool = True,
+    hp: int = 300,
+    lp: int = 3000,
+    min_windows: int = 1,
+) -> Dict[str, float]:
+    """Estimate per-CLIP base alignment offsets relative to a reference camera.
+
+    This function is designed for motion-triggered cameras where each clip is a
+    short burst (e.g., ~1 minute) and should be aligned independently.
+
+    Strategy:
+    - For each clip, find overlapping clip(s) from the reference camera.
+    - Slide windows across the overlap and compute GCC-PHAT delays.
+    - Aggregate delays with median to obtain the base offset for THAT clip.
+    - If no usable windows are found (no overlap or decode issues), return 0.0
+      for that clip to fall back to filename timestamp alignment.
+
+    Returns:
+        Dict mapping clip.path -> offset_seconds (positive means the clip lags
+        behind the reference and should start later in the event timeline).
+    """
+    clips = list(camera_clips)
+    if not clips:
+        return {}
+
+    hop = float(hop_seconds) if hop_seconds else window_seconds / 2.0
+
+    # Group clips by camera and sort by start
+    by_cam: Dict[str, List[ClipLike]] = {}
+    for c in clips:
+        by_cam.setdefault(c.camera, []).append(c)
+    for cam in by_cam:
+        by_cam[cam].sort(key=lambda x: x.start_time)
+
+    # Fallback reference choice if missing
+    if ref_camera not in by_cam:
+        ref_camera = sorted(by_cam.keys())[0]
+    ref_clips = by_cam[ref_camera]
+
+    # Helper: find overlaps between a clip and reference camera clips
+    def _overlaps_with_ref(clip: ClipLike) -> List[Tuple[float, float, ClipLike]]:
+        res: List[Tuple[float, float, ClipLike]] = []
+        c0, c1 = clip.start_time, clip.start_time + clip.duration
+        for rc in ref_clips:
+            r0, r1 = rc.start_time, rc.start_time + rc.duration
+            o0 = max(r0, c0)
+            o1 = min(r1, c1)
+            if o1 - o0 > 0.5:  # at least some overlap
+                res.append((o0, o1, rc))
+        return res
+
+    offsets_by_path: Dict[str, float] = {}
+
+    for clip in clips:
+        # Reference camera clips are aligned to themselves
+        if clip.camera == ref_camera:
+            offsets_by_path[clip.path] = 0.0
+            continue
+
+        overlaps = _overlaps_with_ref(clip)
+        if not overlaps:
+            # No overlap with reference: fall back to timestamp
+            offsets_by_path[clip.path] = 0.0
+            continue
+
+        delays: List[float] = []
+
+        for o0, o1, rc in overlaps:
+            ov_dur = o1 - o0
+            if ov_dur <= 0.2:
+                continue
+            w = min(window_seconds, ov_dur)
+            if w <= 0.2:
+                continue
+            cur_hop = max(0.1, min(hop, w))
+            t = o0
+            safety = 0
+            while t + w <= o1 + 1e-6 and safety < 10000:
+                safety += 1
+                ref_src = max(0.0, t - rc.start_time)
+                cam_src = max(0.0, t - clip.start_time)
+                ref_samples = _extract_audio_segment(rc.path, ref_src, w, sample_rate, bandpass, hp, lp)
+                cam_samples = _extract_audio_segment(clip.path, cam_src, w, sample_rate, bandpass, hp, lp)
+                if ref_samples.size == 0 or cam_samples.size == 0:
+                    t += cur_hop
+                    continue
+                # normalize
+                ref_samples = ref_samples - float(np.mean(ref_samples))
+                cam_samples = cam_samples - float(np.mean(cam_samples))
+                ref_norm = float(np.linalg.norm(ref_samples)) or 1.0
+                cam_norm = float(np.linalg.norm(cam_samples)) or 1.0
+                ref_samples /= ref_norm
+                cam_samples /= cam_norm
+                delay = gcc_phat(cam_samples, ref_samples, fs=sample_rate, max_tau=max_shift_seconds)
+                delay = max(-max_shift_seconds, min(max_shift_seconds, delay))
+                delays.append(float(delay))
+                t += cur_hop
+
+        if len(delays) < max(min_windows, 1):
+            offsets_by_path[clip.path] = 0.0
+            continue
+
+        offsets_by_path[clip.path] = float(np.median(np.asarray(delays)))
+
+    return offsets_by_path

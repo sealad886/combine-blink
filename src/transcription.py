@@ -4,13 +4,28 @@ import tempfile
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional
 
-import torch
-import whisper
-from pyannote.audio import Pipeline
-from pyannote.core import Annotation
-from pyannote.core import Segment
-from .media_utils import MediaInfo, extract_audio_segment, probe_media_info
-from .whisper_cpp_wrapper import WhisperCppWrapper, is_ggml_model
+# Optional heavy dependencies: make imports resilient so utility functions
+# and tests that don't require these libs can still run in lightweight envs.
+try:  # torch is used to pick device when device=="auto"; optional for tests
+    import torch  # type: ignore
+except Exception:  # pragma: no cover - absence is acceptable for non-ML paths/tests
+    torch = None  # type: ignore
+
+try:  # openai-whisper backend; optional if using whisper.cpp or for unit tests
+    import whisper  # type: ignore
+except Exception:  # pragma: no cover
+    whisper = None  # type: ignore
+
+try:  # diarization backend; optional for unit tests that don't run diarization
+    from pyannote.audio import Pipeline  # type: ignore
+    from pyannote.core import Annotation  # type: ignore
+    from pyannote.core import Segment  # type: ignore
+except Exception:  # pragma: no cover
+    Pipeline = None  # type: ignore
+    Annotation = None  # type: ignore
+    Segment = None  # type: ignore
+from src.media_utils import MediaInfo, extract_audio_segment, probe_media_info
+from src.whisper_cpp_wrapper import WhisperCppWrapper, is_ggml_model
 
 
 @dataclass
@@ -225,6 +240,9 @@ class _WhisperTranscriber:
 
     def __init__(self, settings: WhisperSettings) -> None:
         self.settings = settings
+        # Pre-init to keep __init__ free of any return value and satisfy type checkers
+        self.model: Any = None
+        self.use_whisper_cpp: bool = False
 
         # Core ML support: use whisper.cpp with Core ML model
         if settings.device == "coreml":
@@ -332,10 +350,15 @@ class _PyannoteDiarizer:
             )
         self.settings = settings
         logging.info("Loading pyannote pipeline '%s'", settings.model_id)
-        self.pipeline: Pipeline = Pipeline.from_pretrained(settings.model_id, token=settings.auth_token)
+        # Avoid strict typing here so module can import without pyannote installed in test envs
+        self.pipeline = Pipeline.from_pretrained(settings.model_id, token=settings.auth_token)
 
-    def diarize_file(self, audio_path: str) -> Annotation:
+    def diarize_file(self, audio_path: str) -> Any:
         """Run diarization and return Annotation object."""
+        if self.pipeline is None:
+            raise RuntimeError(
+                "pyannote.audio Pipeline is not initialized. Ensure dependencies are installed."
+            )
         diarization_output = self.pipeline(audio_path)
         # Extract the Annotation from DiarizeOutput
         return diarization_output.speaker_diarization
@@ -343,7 +366,7 @@ class _PyannoteDiarizer:
 
 def _assign_speakers(
     transcript_segments: Iterable[Dict[str, Any]],
-    diarization_annotation: Annotation,
+    diarization_annotation: Any,
     min_overlap_ratio: float,
 ) -> List[Dict[str, Any]]:
     """Annotate transcript segments with speaker labels from diarization output."""

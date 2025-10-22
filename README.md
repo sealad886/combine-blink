@@ -73,7 +73,7 @@ Where:
 1. Install Dependencies:
    It is highly recommended to use a virtual environment.
    pip install \-r requirements.txt
-   The multi-camera composer samples a handful of frames per clip using OpenCV's HOG person detector. `opencv-python` ships with `requirements.txt`; if you'd rather skip it, disable `multi_camera_composition.people_detection.enabled` (silent segments will revert to audio-only selection and the review indicator will not be shown).
+   The multi-camera composer can estimate how many people are visible using a Hugging Face object detector (default: YOLOS‑tiny). If you'd rather skip it, set `multi_camera_composition.people_detection.enabled: false` (silent segments will revert to audio-only selection and the review indicator will not be shown). You can change the detector via `model_name` (e.g., `facebook/detr-resnet-50`).
 
 ### Hugging Face access token (required for diarization/embeddings)
 
@@ -303,12 +303,13 @@ multi_camera_composition:
 #### 4. Speech + People-Aware Switching
 ```yaml
 multi_camera_composition:
-  switching_strategy: speech_people
-  people_detection:
-    enabled: true      # requires opencv-python (default from requirements.txt)
+   switching_strategy: speech_people
+   people_detection:
+      enabled: true
+      model_name: hustvl/yolos-tiny   # CPU-friendly default; DETR also supported
 ```
 - Keeps the active speaker on screen whenever diarized speech is present (Stage 3 output required)
-- During silent stretches, switches to the camera showing the largest number of people (via OpenCV's HOG detector)
+- During silent stretches, switches to the camera showing the largest number of people (via a Hugging Face detector)
 - Highlights those silent, multi-angle moments with a "Review Alt Angles" overlay so you can double-check alternate views later
 - Falls back to audio-based selection automatically when people detection is disabled or OpenCV is unavailable
 
@@ -622,11 +623,12 @@ The pipeline executes a series of stages in a specific order:
    c. **Speaker Identification**: For each diarized segment the pipeline extracts an aligned audio window, computes a pyannote embedding, and either reuses the closest existing speaker profile (via cosine similarity) or registers a new persistent speaker ID. The first time a speaker is heard, a sample of their voice is saved to the speakers\_dir for future voice cloning.
 
    d. **Multi-Camera Composition / Video Merging**:
-      - **Multi-Camera Groups**: If the group contains clips from multiple cameras, the multi-camera composer:
-        1. Analyzes audio quality for each camera and (when the `speech_people` strategy is selected) estimates how many people are visible using OpenCV's built-in person detector
+         - **Multi-Camera Groups**: If the group contains clips from multiple cameras, the multi-camera composer:
+            1. Analyzes audio quality for each camera and (when the `speech_people` strategy is selected) estimates how many people are visible using a Hugging Face object detector
         2. Selects the best audio source and aligns clips against the diarized speech timeline when available
         3. Generates a switching timeline based on the configured strategy—`speech_people` keeps the speaking camera in view and, during silent moments, switches to the angle with the most people
-        4. Creates a composite video with automatic angle switching; with `speech_people`, a top-right "Review Alt Angles" indicator is displayed whenever multiple angles contain people during a silent stretch
+            4. Creates a composite video with automatic angle switching; with `speech_people`, a top-right "Review Alt Angles" indicator is displayed whenever multiple angles contain people during a silent stretch
+            5. Uses a single-pass ffmpeg filter_complex path by default (faster), with a robust multi-step fallback
       - **Single-Camera Groups**: Uses simple sequential merge with crossfade transitions
 
    e. **Output Generation**: The final composite/merged video, the diarized transcript (with speaker names substituted from the config), and the speaker voice samples are all saved to the output\_dir.

@@ -12,18 +12,17 @@ import re
 import subprocess
 import tempfile
 import json
+import io
 from datetime import datetime, timedelta
 from typing import Callable, List, Dict, Any, Tuple, Optional
 from dataclasses import dataclass
 import numpy as np
 
-try:
-    import cv2  # type: ignore
-except Exception:  # pragma: no cover - optional dependency
-    cv2 = None
+from PIL import Image
 
 from src.media_utils import probe_media_info
-from src.av_alignment import estimate_offsets_and_drift
+from src.av_alignment import estimate_offsets_and_drift, estimate_per_clip_offsets
+from src.people_detection import PeopleDetector, PeopleDetectorConfig
 
 
 @dataclass
@@ -121,28 +120,28 @@ class MultiCameraComposer:
 
         people_defaults = {
             'enabled': True,
-            'sample_frames': 6,
+            'sample_frames': 6,  # retained for compatibility; detection is on-demand now
             'resize_width': 640,
             'min_frame_width': 320,
+            # Default to a lighter, CPU-friendly model
+            'model_name': 'hustvl/yolos-tiny',
+            'revision': None,
+            'score_threshold': 0.7,
+            'min_count': 1,
         }
         self.people_config = people_defaults.copy()
         self.people_config.update(self.composition_config.get('people_detection', {}))
         people_enabled_cfg = bool(self.people_config.get('enabled', True))
-        self._people_detection_warned: bool = False
         self._people_detection_enabled: bool = (
-            self.switching_strategy == 'speech_people'
-            and people_enabled_cfg
-            and cv2 is not None
+            self.switching_strategy == 'speech_people' and people_enabled_cfg
         )
-        if self.switching_strategy == 'speech_people' and people_enabled_cfg and cv2 is None and not self._people_detection_warned:
-            logging.warning(
-                "speech_people switching_strategy requires opencv-python for people detection; "
-                "falling back to audio-driven selection."
-            )
-            self._people_detection_warned = True
         self._people_sample_frames: int = max(1, int(self.people_config.get('sample_frames', 6)))
         self._people_resize_width: int = max(160, int(self.people_config.get('resize_width', 640)))
         self._people_min_frame_width: int = max(160, int(self.people_config.get('min_frame_width', 320)))
+        self._people_min_count: int = max(0, int(self.people_config.get('min_count', 1)))
+        # Hugging Face people detector (lazy) and cache
+        self._people_detector: Optional[PeopleDetector] = None
+        self._people_counts_cache: Dict[Tuple[str, int], int] = {}
 
         # Timestamp overlay configuration
         self.overlay_config = self.composition_config.get('timestamp_overlay', {
@@ -218,6 +217,15 @@ class MultiCameraComposer:
         # Audio stitching improvements
         self._audio_crossfade_s: float = float(self.composition_config.get('audio_crossfade_seconds', 0.06))
 
+        # Encoding/IO performance options
+        enc_cfg = self.composition_config.get('encoding', {})
+        self._single_pass = bool(self.composition_config.get('single_pass_filter_complex', True))
+        self._use_hw_encode = bool(enc_cfg.get('use_hw_encode', False))
+        self._hw_codec = str(enc_cfg.get('hw_codec', 'libx264'))
+        self._x264_preset = str(enc_cfg.get('x264_preset', 'veryfast'))
+        self._x264_crf = str(enc_cfg.get('x264_crf', '22'))
+        self._target_bitrate = str(enc_cfg.get('bitrate', '6000k'))
+
     def compose_multi_camera_event(
         self,
         video_clips: List[Dict[str, Any]],
@@ -278,11 +286,11 @@ class MultiCameraComposer:
             self._review_segments = []
             _report_progress(int(total_steps * 0.2))
 
-            # Step 1b: Estimate per-camera fine alignment offsets and adjust timings (10% of work)
+            # Step 1b: Estimate per-clip fine alignment offsets and adjust timings (10% of work)
             if self._alignment_enabled:
                 try:
                     ref_clip = max(camera_clips, key=lambda x: x.audio_quality_score)
-                    offsets, drifts = estimate_offsets_and_drift(
+                    clip_offsets = estimate_per_clip_offsets(
                         camera_clips,
                         ref_clip.camera,
                         sample_rate=self._alignment_sr,
@@ -292,19 +300,15 @@ class MultiCameraComposer:
                         bandpass=self._alignment_bandpass,
                         hp=self._alignment_hp,
                         lp=self._alignment_lp,
-                        estimate_drift=self._alignment_estimate_drift,
                     )
-                    self._alignment_offsets = dict(offsets or {})
-                    self._alignment_drifts = dict(drifts or {})
-                    if self._alignment_offsets:
-                        # Apply base offsets to clip start times for better video sync; drift applied later to audio only
+                    # Store and apply per-clip base offsets
+                    self._alignment_offsets_clip = dict(clip_offsets or {})
+                    if self._alignment_offsets_clip:
                         for cc in camera_clips:
-                            base = self._alignment_offsets.get(cc.camera, 0.0)
+                            base = self._alignment_offsets_clip.get(cc.path, 0.0)
                             if abs(base) > 1e-6:
                                 cc.start_time = max(0.0, cc.start_time + base)
-                        logging.info("Applied alignment offsets: %s", json.dumps(self._alignment_offsets))
-                        if any(abs(v) > 1e-6 for v in self._alignment_drifts.values()):
-                            logging.info("Estimated alignment drifts (s/s): %s", json.dumps(self._alignment_drifts))
+                        logging.info("Applied per-clip alignment offsets for %d clips", len(self._alignment_offsets_clip))
                 except Exception as e:
                     logging.warning("Audio alignment estimation failed, continuing without it: %s", e)
             _report_progress(int(total_steps * 0.3))
@@ -369,10 +373,8 @@ class MultiCameraComposer:
             # Video quality can be added later (for now use placeholder)
             video_score = 1.0
 
-            if self._people_detection_enabled:
-                people_count = self._resolve_people_count(clip, media_info)
-            else:
-                people_count = float(clip.get('people_count') or 0.0)
+            # People detection is deferred to composition phase; preserve upstream metadata only
+            people_count = float(clip.get('people_count') or 0.0)
 
             camera_clips.append(CameraClip(
                 path=clip['path'],
@@ -558,97 +560,57 @@ class MultiCameraComposer:
         self._cleanup_filter_string = ','.join(filters) if filters else None
         return self._cleanup_filter_string
 
-    def _resolve_people_count(self, clip: Dict[str, Any], media_info: Any) -> float:
-        """Determine how many people are visible in this clip (best effort)."""
-        # Honour any upstream metadata first
-        for key in ("people_count", "people_estimate", "person_count"):
-            value = clip.get(key)
-            if value is None:
-                continue
-            try:
-                return float(value)
-            except (TypeError, ValueError):
-                logging.debug("Non-numeric %s value '%s' on clip %s", key, value, clip.get('path'))
-
-        video_path = clip.get('path') or clip.get('full_path')
-        if not video_path:
-            return 0.0
-
-        return self._estimate_people_count(video_path, media_info)
-
-    def _estimate_people_count(self, video_path: str, media_info: Any) -> float:
-        if not self._people_detection_enabled:
-            if self.people_config.get('enabled', True) and cv2 is None and not self._people_detection_warned:
-                logging.warning(
-                    "OpenCV is required for people detection but is not installed; "
-                    "falling back to audio-only camera selection."
-                )
-                self._people_detection_warned = True
-            return 0.0
-
-        try:
-            return self._detect_people_hog(video_path, float(getattr(media_info, 'duration', 0.0) or 0.0))
-        except Exception as exc:  # pragma: no cover - best effort fallback
-            logging.warning("People detection failed for %s: %s", video_path, exc)
-            return 0.0
-
-    def _detect_people_hog(self, video_path: str, duration: float) -> float:
-        # Lazily initialise detector per call to avoid cross-process issues
-        hog = cv2.HOGDescriptor()
-        hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
-
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            return 0.0
-
-        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        if frame_count <= 0 and duration > 0:
-            # Fallback estimate of frame count assuming 25fps
-            frame_count = int(duration * 25)
-        frame_count = max(frame_count, self._people_sample_frames)
-
-        step = max(1, frame_count // (self._people_sample_frames + 1))
-        samples = 0
-        detections = 0
-
-        resize_width = self._people_resize_width
-        min_width = self._people_min_frame_width
-
-        for idx in range(self._people_sample_frames):
-            target_frame = min(idx * step, frame_count - 1)
-            cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
-            ok, frame = cap.read()
-            if not ok or frame is None:
-                continue
-
-            height, width = frame.shape[:2]
-            if width <= 0 or height <= 0:
-                continue
-
-            scale = 1.0
-            if width > resize_width:
-                scale = resize_width / float(width)
-            elif width < min_width:
-                scale = min_width / float(width)
-
-            if scale != 1.0:
-                frame = cv2.resize(frame, (int(width * scale), int(height * scale)))
-
-            found, _ = hog.detectMultiScale(
-                frame,
-                winStride=(8, 8),
-                padding=(8, 8),
-                scale=1.05,
+    # --- People detection (Hugging Face) ---
+    def _ensure_people_detector(self) -> None:
+        if self._people_detector is None:
+            cfg = PeopleDetectorConfig(
+                model_name=str(self.people_config.get('model_name', 'facebook/detr-resnet-50')),
+                revision=str(self.people_config.get('revision', 'no_timm')) if self.people_config.get('revision') else None,
+                score_threshold=float(self.people_config.get('score_threshold', 0.7)),
             )
-            detections += len(found)
-            samples += 1
+            self._people_detector = PeopleDetector(cfg)
 
-        cap.release()
+    def _extract_frame_image(self, video_path: str, t_seconds: float) -> Optional[Image.Image]:
+        """Extract a single video frame as PIL Image using ffmpeg at given timestamp."""
+        if t_seconds < 0:
+            return None
+        cmd = [
+            'ffmpeg', '-ss', f"{t_seconds:.3f}", '-i', video_path,
+            '-frames:v', '1', '-f', 'image2', '-vcodec', 'png', '-loglevel', 'error', 'pipe:1'
+        ]
+        try:
+            proc = subprocess.run(cmd, capture_output=True)
+            if proc.returncode != 0 or not proc.stdout:
+                return None
+            bio = io.BytesIO(proc.stdout)
+            img = Image.open(bio).convert('RGB')
+            return img
+        except Exception:
+            return None
 
-        if samples == 0:
-            return 0.0
-
-        return float(detections) / float(samples)
+    def _get_people_count_for_clip_at(self, clip: CameraClip, event_time: float) -> int:
+        """Return people count for a clip at a specific event time (cached)."""
+        if not self._people_detection_enabled:
+            return 0
+        rel = event_time - clip.start_time
+        if rel < 0 or rel > clip.duration:
+            return 0
+        key = (clip.path, int(round(event_time)))
+        if key in self._people_counts_cache:
+            return self._people_counts_cache[key]
+        self._ensure_people_detector()
+        img = self._extract_frame_image(clip.path, max(0.0, rel))
+        if img is None:
+            self._people_counts_cache[key] = 0
+            return 0
+        try:
+            assert self._people_detector is not None
+            count = int(self._people_detector.count_people(img))
+        except Exception as exc:
+            logging.warning("People detection failed at %.2fs for %s: %s", rel, clip.path, exc)
+            count = 0
+        self._people_counts_cache[key] = count
+        return count
 
     def _load_speech_segments(
         self,
@@ -977,7 +939,6 @@ class MultiCameraComposer:
         audio_segments: List[CompositionSegment] = []
 
         speech_people_strategy = self.switching_strategy == 'speech_people'
-        people_threshold = 0.1 if speech_people_strategy else 0.0
 
         for i in range(len(boundaries) - 1):
             seg_start = boundaries[i]
@@ -997,14 +958,23 @@ class MultiCameraComposer:
             multiple_people_angles = False
             if speech_people_strategy:
                 speech_active = self._segment_has_speech(seg_start, seg_end)
-                available_people = [c for c in avail if c.people_count > people_threshold]
-                people_cameras = {c.camera for c in available_people}
-                multiple_people_angles = len(people_cameras) >= 2
+                if not speech_active and len(avail) > 1:
+                    # Evaluate people presence at segment midpoint for each available clip
+                    sample_t = seg_start + 0.5 * seg_dur
+                    counts: Dict[str, int] = {}
+                    for c in avail:
+                        counts[c.path] = self._get_people_count_for_clip_at(c, sample_t)
+                    available_people = [c for c in avail if counts.get(c.path, 0) >= self._people_min_count]
+                    people_cameras = {c.camera for c in available_people}
+                    multiple_people_angles = len(people_cameras) >= 2
 
             # VIDEO selection per strategy (speech-aware)
             selected_v: Optional[CameraClip] = None
             if speech_people_strategy and (not speech_active) and available_people:
-                selected_v = max(available_people, key=lambda x: x.people_count)
+                # Choose the angle with most people
+                # Recompute count lazily to avoid stale values
+                sample_t = seg_start + 0.5 * seg_dur
+                selected_v = max(available_people, key=lambda x: self._get_people_count_for_clip_at(x, sample_t))
             if selected_v is None:
                 if self.switching_strategy == 'audio_quality':
                     selected_v = max(avail, key=lambda x: x.audio_quality_score)
@@ -1050,12 +1020,11 @@ class MultiCameraComposer:
                 selected_a = min(avail, key=lambda x: x.start_time)
 
             a_source_start = max(0.0, seg_start - selected_a.start_time)
-            # Apply dynamic alignment (base + drift * t) to audio source only
-            if self._alignment_enabled and self._alignment_offsets:
-                base = self._alignment_offsets.get(selected_a.camera, 0.0)
-                drift = self._alignment_drifts.get(selected_a.camera, 0.0)
-                offset_at_t = float(base + drift * seg_start)
-                a_source_start = max(0.0, a_source_start + offset_at_t)
+            # Apply per-clip base alignment to audio source only
+            if self._alignment_enabled and hasattr(self, '_alignment_offsets_clip') and self._alignment_offsets_clip:
+                base = self._alignment_offsets_clip.get(selected_a.path, 0.0)
+                if abs(base) > 1e-6:
+                    a_source_start = max(0.0, a_source_start + base)
             audio_segments.append(CompositionSegment(
                 camera=selected_a.camera,
                 clip_path=selected_a.path,
@@ -1236,6 +1205,17 @@ class MultiCameraComposer:
 
         try:
             with tempfile.TemporaryDirectory() as tmpdir:
+                # Prefer a single-pass filter_complex pipeline to minimize IO and re-encoding
+                if self._single_pass:
+                    try:
+                        ok = self._create_composite_video_single_pass(video_timeline, audio_timeline, output_path, tmpdir)
+                        if ok:
+                            logging.info("Single-pass composition succeeded")
+                            return True
+                        else:
+                            logging.warning("Single-pass composition failed; falling back to multi-step pipeline")
+                    except Exception as exc:
+                        logging.warning("Single-pass composition raised error; falling back. %s", exc, exc_info=True)
                 # Step 1: Extract and trim video segments according to timeline
                 segment_files = []
                 for i, segment in enumerate(video_timeline):
@@ -1458,6 +1438,201 @@ class MultiCameraComposer:
             logging.error(f"Error creating composite video: {e}")
             return False
 
+    # --- Performance-optimized single-pass composition ---
+    def _probe_video_dimensions(self, path: str) -> Tuple[int, int]:
+        """Return (width, height) for the first video stream via ffprobe; fallback to 1920x1080."""
+        try:
+            res = subprocess.run(
+                [
+                    'ffprobe', '-v', 'error', '-select_streams', 'v:0',
+                    '-show_entries', 'stream=width,height', '-of', 'json', path
+                ],
+                capture_output=True, text=True, check=True
+            )
+            data = json.loads(res.stdout or '{}')
+            streams = data.get('streams') or []
+            if streams:
+                w = int(streams[0].get('width') or 1920)
+                h = int(streams[0].get('height') or 1080)
+                # enforce even dimensions
+                w -= (w % 2)
+                h -= (h % 2)
+                return max(2, w), max(2, h)
+        except Exception:
+            pass
+        return 1920, 1080
+
+    def _probe_has_audio(self, path: str) -> bool:
+        """Return True if input has at least one audio stream."""
+        try:
+            res = subprocess.run(
+                [
+                    'ffprobe', '-v', 'error', '-select_streams', 'a',
+                    '-show_entries', 'stream=index', '-of', 'csv=p=0', path
+                ],
+                capture_output=True, text=True, check=True
+            )
+            out = (res.stdout or '').strip()
+            return bool(out)
+        except Exception:
+            return True  # assume yes to avoid over-restricting
+
+    @staticmethod
+    def _escape_subtitles_path(path: str) -> str:
+        """Escape path for ffmpeg subtitles filter usage."""
+        # Escape backslashes and single quotes
+        return path.replace('\\', r'\\').replace("'", r"\'")
+
+    def _video_codec_args(self) -> List[str]:
+        """Return ffmpeg args for chosen video encoder."""
+        if self._use_hw_encode:
+            # Hardware encoder (macOS videotoolbox). Use bitrate-based control.
+            return [
+                '-c:v', self._hw_codec,
+                '-b:v', self._target_bitrate,
+                '-pix_fmt', 'yuv420p',
+            ]
+        # x264 software encoder
+        return [
+            '-c:v', 'libx264',
+            '-preset', self._x264_preset,
+            '-crf', self._x264_crf,
+            '-pix_fmt', 'yuv420p',
+        ]
+
+    def _create_composite_video_single_pass(
+        self,
+        video_timeline: List[CompositionSegment],
+        audio_timeline: List[CompositionSegment],
+        output_path: str,
+        tmpdir: str,
+    ) -> bool:
+        """Compose using one ffmpeg -filter_complex (trim+concat video, trim+xfade audio, optional overlay)."""
+        if not video_timeline:
+            return False
+
+        # Determine unique inputs and index mapping
+        unique_paths: List[str] = []
+        index_by_path: Dict[str, int] = {}
+        def _add(p: str):
+            if p not in index_by_path:
+                index_by_path[p] = len(unique_paths)
+                unique_paths.append(p)
+        for seg in video_timeline:
+            _add(seg.clip_path)
+        for seg in audio_timeline:
+            _add(seg.clip_path)
+
+        # Probe a reference resolution from the first video segment
+        ref_w, ref_h = self._probe_video_dimensions(video_timeline[0].clip_path)
+
+        # Overlay ASS if needed
+        need_overlay = (self._overlay_enabled and self._event_start is not None) or bool(self._review_segments)
+        ass_path = None
+        if need_overlay:
+            total_duration = sum(s.duration for s in video_timeline)
+            ass_path = self._generate_timestamp_ass(
+                tmpdir=tmpdir,
+                total_duration=total_duration,
+                event_start=self._event_start,
+                dst_offset_hours=self._overlay_dst_hours,
+                include_timestamp=self._overlay_enabled and self._event_start is not None,
+                review_segments=self._review_segments,
+            )
+
+        # Build filter graph
+        filters: List[str] = []
+
+        # Video trims
+        v_labels: List[str] = []
+        for idx, seg in enumerate(video_timeline):
+            ip = index_by_path[seg.clip_path]
+            start = max(0.0, seg.source_start)
+            end = start + max(0.0, seg.duration)
+            vlab = f"v{idx}"
+            v_labels.append(vlab)
+            filters.append(
+                f"[{ip}:v]trim=start={start:.3f}:end={end:.3f},setpts=PTS-STARTPTS,"
+                f"scale={ref_w}:{ref_h}:force_original_aspect_ratio=decrease,"
+                f"pad={ref_w}:{ref_h}:(({ref_w}-iw)/2):(({ref_h}-ih)/2):color=black,format=yuv420p,setsar=1[{vlab}]"
+            )
+
+        # Video concat
+        v_inputs = ''.join(f'[{l}]' for l in v_labels)
+        filters.append(f"{v_inputs}concat=n={len(v_labels)}:v=1:a=0[vcat]")
+        if ass_path:
+            ass_escaped = self._escape_subtitles_path(ass_path)
+            filters.append(f"[vcat]subtitles='{ass_escaped}'[vout]")
+            vout = 'vout'
+        else:
+            vout = 'vcat'
+
+        # Audio trims
+        a_labels: List[str] = []
+        # Cache which input has audio
+        has_audio_map: Dict[str, bool] = {p: self._probe_has_audio(p) for p in unique_paths}
+        for idx, seg in enumerate(audio_timeline):
+            ip = index_by_path[seg.clip_path]
+            start = max(0.0, seg.source_start)
+            end = start + max(0.0, seg.duration)
+            alab = f"a{idx}"
+            a_labels.append(alab)
+            if has_audio_map.get(unique_paths[ip], True):
+                filters.append(f"[{ip}:a]atrim=start={start:.3f}:end={end:.3f},asetpts=PTS-STARTPTS[{alab}]")
+            else:
+                dur = max(0.0, seg.duration)
+                filters.append(f"anullsrc=r=48000:cl=stereo,atrim=duration={dur:.3f},asetpts=PTS-STARTPTS[{alab}]")
+
+        # Audio stitch: acrossfade ladder or concat
+        if not a_labels:
+            # If no audio timeline, create silent audio to keep mux stable
+            filters.append(f"anullsrc=r=48000:cl=stereo[asilent]")
+            aout = 'asilent'
+        elif len(a_labels) == 1 or self._audio_crossfade_s <= 0.0:
+            a_inputs = ''.join(f'[{l}]' for l in a_labels)
+            filters.append(f"{a_inputs}concat=n={len(a_labels)}:v=0:a=1[acat]")
+            aout = 'acat'
+        else:
+            cf = max(0.01, min(5.0, self._audio_crossfade_s))
+            if len(a_labels) == 2:
+                filters.append(f"[{a_labels[0]}][{a_labels[1]}]acrossfade=d={cf}:c1=tri:c2=tri[afx]")
+                aout = 'afx'
+            else:
+                # Build chain
+                filters.append(f"[{a_labels[0]}][{a_labels[1]}]acrossfade=d={cf}:c1=tri:c2=tri[a01]")
+                last = 'a01'
+                for i in range(2, len(a_labels)):
+                    nxt = f"a0{i}"
+                    filters.append(f"[{last}][{a_labels[i]}]acrossfade=d={cf}:c1=tri:c2=tri[{nxt}]")
+                    last = nxt
+                aout = last
+
+        # Optional audio cleanup after stitching
+        a_cleanup = self._build_audio_cleanup_filter()
+        if a_cleanup and aout:
+            filters.append(f"[{aout}]{a_cleanup}[aout]")
+            aout = 'aout'
+
+        # Assemble command
+        cmd: List[str] = ['ffmpeg', '-y', '-loglevel', 'error']
+        for p in unique_paths:
+            cmd.extend(['-i', p])
+        cmd.extend([
+            '-filter_complex', '; '.join(filters),
+            '-map', f'[{vout}]',
+            '-map', f'[{aout}]',
+        ])
+        # Video codec args
+        cmd.extend(self._video_codec_args())
+        # Audio encode
+        cmd.extend(['-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2', '-movflags', '+faststart', output_path])
+
+        res = subprocess.run(cmd, capture_output=True)
+        if res.returncode != 0:
+            logging.error("Single-pass ffmpeg failed: %s", (res.stderr or b'').decode(errors='ignore')[:1000])
+            return False
+        return True
+
     def _simple_copy(self, video_clips: List[Dict[str, Any]], output_path: str) -> bool:
         """
         Simple copy of a single video file.
@@ -1484,7 +1659,7 @@ class MultiCameraComposer:
         """
         Sequential merge of clips from the same camera (fallback behavior).
         """
-        from .video import merge_video_clips
+        from src.video import merge_video_clips
 
         video_paths = [clip['path'] for clip in sorted(video_clips, key=lambda x: x['datetime'])]
         crossfade = self.config.get('video_processing', {}).get('crossfade_duration', 0.5)

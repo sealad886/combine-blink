@@ -120,6 +120,68 @@ def _crossfade_pair(first_clip: str, second_clip: str, output_path: str, duratio
 
 
 def _concat_pair(first_clip: str, second_clip: str, output_path: str) -> bool:
+    """Safely concatenate two clips, re-encoding to avoid H.264 parameter mismatches.
+
+    Using the concat demuxer with stream copy (-c copy) is fragile when SPS/PPS,
+    time base, SAR, or color space differ across inputs. This implementation
+    prefers a filter-based concat with re-encode when both inputs have audio,
+    and falls back to demuxer with re-encode otherwise.
+    """
+    first_info = probe_media_info(first_clip)
+    second_info = probe_media_info(second_clip)
+    both_have_audio = bool(first_info.has_audio and second_info.has_audio)
+    any_audio = bool(first_info.has_audio or second_info.has_audio)
+
+    if both_have_audio:
+        # Filter-based concat ensures consistent timestamps and pixel format
+        filter_complex = (
+            "[0:v]setpts=PTS-STARTPTS,format=yuv420p,setsar=1[v0];"
+            "[1:v]setpts=PTS-STARTPTS,format=yuv420p,setsar=1[v1];"
+            "[v0][v1]concat=n=2:v=1:a=0[vout];"
+            "[0:a]asetpts=PTS-STARTPTS[a0];"
+            "[1:a]asetpts=PTS-STARTPTS[a1];"
+            "[a0][a1]concat=n=2:v=0:a=1[aout]"
+        )
+
+        command = [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-i",
+            first_clip,
+            "-i",
+            second_clip,
+            "-filter_complex",
+            filter_complex,
+            "-map",
+            "[vout]",
+            "-map",
+            "[aout]",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "faster",
+            "-crf",
+            "20",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-movflags",
+            "+faststart",
+            output_path,
+        ]
+
+        result = subprocess.run(command)
+        if result.returncode != 0:
+            logging.error("ffmpeg filter-concat failed for %s and %s", first_clip, second_clip)
+            return False
+        return True
+
+    # Fallback: concat demuxer with re-encode (handles video-only or mixed audio presence)
     with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as concat_file:
         concat_file.write(f"file '{os.path.abspath(first_clip)}'\n")
         concat_file.write(f"file '{os.path.abspath(second_clip)}'\n")
@@ -136,16 +198,24 @@ def _concat_pair(first_clip: str, second_clip: str, output_path: str) -> bool:
         "0",
         "-i",
         list_path,
-        "-c",
-        "copy",
-        output_path,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "faster",
+        "-crf",
+        "20",
+        "-pix_fmt",
+        "yuv420p",
     ]
+    if any_audio:
+        command.extend(["-c:a", "aac", "-b:a", "192k"])  # re-encode audio if present
+    command.extend(["-movflags", "+faststart", output_path])
 
     result = subprocess.run(command)
     os.remove(list_path)
 
     if result.returncode != 0:
-        logging.error("ffmpeg concat failed for %s and %s", first_clip, second_clip)
+        logging.error("ffmpeg concat (re-encode) failed for %s and %s", first_clip, second_clip)
         return False
 
     return True
