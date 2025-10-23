@@ -11,22 +11,24 @@ Author: Phase 5 integration
 Status: Stub - to be implemented
 """
 
-from typing import Optional, Callable, List, Dict, Any
+from collections.abc import Callable
 from pathlib import Path
-from .config import CompositionConfig
-from .models import CameraClip, SpeechSegment, Timeline
-from .quality import FFmpegAudioQualityAnalyzer, CachedQualityAnalyzer
+from typing import Any
+
 from .alignment import CachedAlignmentEngine
-from .timeline import TimelineGenerator
-from .rendering import SinglePassRenderer, MultiPassRenderer
 from .audio import AudioProcessor
+from .config import CompositionConfig
+from .models import CameraClip, SpeechSegment
 from .overlay import OverlayGenerator
+from .quality import CachedQualityAnalyzer, FFmpegAudioQualityAnalyzer
+from .rendering import MultiPassRenderer, SinglePassRenderer
+from .timeline import TimelineGenerator
 
 
 class ModularComposer:
     """Main multi-camera composition orchestrator."""
 
-    def __init__(self, config_dict: Dict[str, Any]):
+    def __init__(self, config_dict: dict[str, Any]):
         """Initialize composer with configuration dictionary."""
         self.config = CompositionConfig.from_dict(config_dict.get('multi_camera_composition', {}))
 
@@ -50,11 +52,11 @@ class ModularComposer:
 
     def compose_multi_camera_event(
         self,
-        video_clips: List[Dict[str, Any]],
+        video_clips: list[dict[str, Any]],
         output_video_path: str,
-        speech_segments: Optional[List[Dict[str, Any]]] = None,
-        speech_timeline: Optional[Any] = None,
-        progress_callback: Optional[Callable[[str, float], None]] = None
+        speech_segments: list[dict[str, Any]] | None = None,
+        speech_timeline: Any | None = None,
+        progress_callback: Callable[[str, float], None] | None = None
     ) -> bool:
         """
         Compose multi-camera event into single video.
@@ -71,11 +73,11 @@ class ModularComposer:
         """
         raise NotImplementedError("Phase 5 integration pending")
 
-    def _convert_clips(self, video_clips: List[Dict[str, Any]]) -> List[CameraClip]:
+    def _convert_clips(self, video_clips: list[dict[str, Any]]) -> list[CameraClip]:
         """Convert legacy clip format to CameraClip models."""
         raise NotImplementedError("Phase 5 integration pending")
 
-    def _convert_speech(self, speech_segments: Optional[List[Dict[str, Any]]]) -> Optional[List[SpeechSegment]]:
+    def _convert_speech(self, speech_segments: list[dict[str, Any]] | None) -> list[SpeechSegment] | None:
         """Convert legacy speech format to SpeechSegment models."""
         raise NotImplementedError("Phase 5 integration pending")
 

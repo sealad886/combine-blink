@@ -69,9 +69,12 @@ video:0kB audio:120kB subtitle:0kB other streams:0kB global headers:0kB muxing o
 """
 
     def test_analyzer_initialization(self, analyzer):
-        """Test analyzer initializes with correct timeout."""
+        """Test analyzer initializes with correct timeout and logger availability via standard logging."""
+        import logging
         assert analyzer.timeout == 30
-        assert analyzer.logger is not None
+        # Ensure a logger can be obtained for the analyzer's module
+        module_logger = logging.getLogger(FFmpegAudioQualityAnalyzer.__module__)
+        assert isinstance(module_logger, logging.Logger)
 
     def test_analyze_no_audio(self, analyzer):
         """Test analyze returns minimal quality for videos without audio."""

@@ -1,12 +1,10 @@
 import hashlib
 import json
 import logging
-import os
 import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 
 @dataclass
@@ -52,7 +50,7 @@ def probe_media_info(path: str) -> MediaInfo:
         )
         payload = json.loads(result.stdout) if result.stdout else {}
         fmt = payload.get("format", {})
-        duration_str: Optional[str] = fmt.get("duration")
+        duration_str: str | None = fmt.get("duration")
         duration = float(duration_str) if duration_str is not None else 0.0
 
         streams = payload.get("streams", [])
@@ -86,7 +84,7 @@ def probe_media_info(path: str) -> MediaInfo:
 
 
 
-def repair_video(video_path: str, output_path: str, cache_dir: Optional[str] = None, strategy: str = "fill") -> bool:
+def repair_video(video_path: str, output_path: str, cache_dir: str | None = None, strategy: str = "fill") -> bool:
     """
     Repair damaged video clips by either filling missing frames or removing blank frames, and synchronizing audio/video.
 
@@ -99,15 +97,15 @@ def repair_video(video_path: str, output_path: str, cache_dir: Optional[str] = N
     Returns:
         True if repair successful, False otherwise
     """
-    cache_path: Optional[Path] = None
-    legacy_cache_path: Optional[Path] = None
+    cache_path: Path | None = None
+    legacy_cache_path: Path | None = None
 
     # Check if already repaired (cached) and always use it if present
     if cache_dir:
         cache_path = build_repair_cache_path(video_path, cache_dir, strategy)
         legacy_cache_path = legacy_repair_cache_path(video_path, cache_dir, strategy)
 
-        existing_cache: Optional[Path] = None
+        existing_cache: Path | None = None
         if cache_path.exists():
             existing_cache = cache_path
         elif legacy_cache_path.exists():
@@ -236,8 +234,8 @@ def repair_video(video_path: str, output_path: str, cache_dir: Optional[str] = N
 def extract_audio_segment(
     video_path: str,
     output_path: str,
-    start: Optional[float] = None,
-    end: Optional[float] = None,
+    start: float | None = None,
+    end: float | None = None,
     sample_rate: int = 16000,
     channels: int = 1,
 ) -> bool:

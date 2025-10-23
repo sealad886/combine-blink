@@ -49,3 +49,41 @@ exclude = ["tests*", "docs*", "logs*", "output*", "whisper.cpp*", "25-10-15*"]
 
 [tool.setuptools]
 include-package-data = false
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",  # pycodestyle errors
+    "F",  # pyflakes
+    "I",  # isort
+    "B",  # flake8-bugbear
+    "UP", # pyupgrade
+]
+ignore = [
+    "E501",  # line length handled by context; avoid churn in existing docs/strings
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests and manual scripts often use flexible imports, unused vars for fixtures, etc.
+"tests/**" = [
+    "I001",  # import sorting noise in tests
+    "F401",  # unused imports (fixtures/helpers)
+    "F841",  # assigned but unused (intermediate asserts/data)
+    "F541",  # f-string without placeholders used as markers
+    "B007",  # unused loop control variables in parametrized loops
+    "E402",  # module import not at top (inline test setup)
+    "UP015", # unnecessary mode args in open(...)
+    "UP006", # typing.List/Dict in test type hints
+    "UP035", # typing imports modernization in tests
+    "B017",  # blind exception assertions
+    "B905",  # zip without strict in tests
+]
+# Root-level ad-hoc test/demo scripts
+"test_*.py" = ["I001", "F401", "F841", "F541", "B007", "E402", "UP015", "UP006", "UP035"]
+"quick_compose_test.py" = ["I001", "F401", "F841", "F541", "B007", "E402", "UP015", "UP006", "UP035"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["blink_pipeline"]

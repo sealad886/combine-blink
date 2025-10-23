@@ -12,20 +12,20 @@ Key principles:
 - Clear separation: raw input → validation/repair → processing
 """
 
+import json
 import logging
 import os
-import json
 import tempfile
+from collections.abc import Callable
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional, Callable
-from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from blink_pipeline.media_utils import (
-    probe_media_info,
-    repair_video,
     build_repair_cache_path,
     legacy_repair_cache_path,
+    probe_media_info,
+    repair_video,
 )
 
 
@@ -39,7 +39,7 @@ def _get_progress_file_path(cache_dir: str) -> Path:
     return Path(cache_dir) / ".preprocessing_progress.json"
 
 
-def _load_progress(cache_dir: str) -> Optional[Dict]:
+def _load_progress(cache_dir: str) -> dict | None:
     """
     Load progress from previous interrupted run.
 
@@ -52,7 +52,7 @@ def _load_progress(cache_dir: str) -> Optional[Dict]:
         return None
 
     try:
-        with open(progress_file, 'r') as f:
+        with open(progress_file) as f:
             progress = json.load(f)
 
         # Validate structure
@@ -61,19 +61,19 @@ def _load_progress(cache_dir: str) -> Optional[Dict]:
             return None
 
         return progress
-    except (json.JSONDecodeError, IOError) as e:
+    except (OSError, json.JSONDecodeError) as e:
         logging.warning(f"Could not load progress file: {e}, starting fresh")
         return None
 
 
-def _save_progress(cache_dir: str, progress_data: Dict) -> None:
+def _save_progress(cache_dir: str, progress_data: dict) -> None:
     """
     Atomically save progress to file.
 
     Uses atomic write (temp file + rename) to prevent corruption.
     """
     progress_file = _get_progress_file_path(cache_dir)
-    tmp_path: Optional[str] = None
+    tmp_path: str | None = None
 
     # Write to temporary file first
     try:
@@ -96,7 +96,8 @@ def _save_progress(cache_dir: str, progress_data: Dict) -> None:
         if tmp_path and os.path.exists(tmp_path):
             try:
                 os.unlink(tmp_path)
-            except:
+            except Exception:
+                # Best-effort cleanup; ignore failures
                 pass
 
 
@@ -134,7 +135,7 @@ def _get_cache_path_legacy(video_path: str, cache_dir: str, strategy: str) -> Pa
     return legacy_repair_cache_path(video_path, cache_dir, strategy)
 
 
-def _validate_video_job(args: Tuple[str, str, str, bool]) -> Tuple[str, str, str]:
+def _validate_video_job(args: tuple[str, str, str, bool]) -> tuple[str, str, str]:
     """
     Worker: Validate a single video and repair if necessary.
 
@@ -193,14 +194,14 @@ def _validate_video_job(args: Tuple[str, str, str, bool]) -> Tuple[str, str, str
 
 
 def preprocess_videos(
-    video_paths: List[str],
+    video_paths: list[str],
     cache_dir: str,
     strategy: str = "fill",
     always_repair: bool = False,
     max_workers: int = 8,
-    progress_callback: Optional[Callable[[int, int], None]] = None,
+    progress_callback: Callable[[int, int], None] | None = None,
     enable_resume: bool = True
-) -> Dict[str, str]:
+) -> dict[str, str]:
     """
     Validate and repair all videos upfront, returning a path mapping.
 
@@ -231,7 +232,7 @@ def preprocess_videos(
     os.makedirs(cache_dir, exist_ok=True)
 
     total = len(video_paths)
-    path_mapping: Dict[str, str] = {}
+    path_mapping: dict[str, str] = {}
 
     # Load previous progress if resuming
     prior_progress = _load_progress(cache_dir) if enable_resume else None
@@ -335,7 +336,7 @@ def preprocess_videos(
     return path_mapping
 
 
-def get_validation_stats(path_mapping: Dict[str, str]) -> Tuple[int, int, int]:
+def get_validation_stats(path_mapping: dict[str, str]) -> tuple[int, int, int]:
     """
     Analyze path mapping to get validation statistics.
 

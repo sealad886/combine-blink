@@ -15,10 +15,10 @@ Classes:
 Author: Phase 3 implementation (data models)
 """
 
-from dataclasses import dataclass, field
-from typing import Optional, Dict, Any, List
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 
 @dataclass
@@ -32,15 +32,15 @@ class CameraClip:
     duration: float  # seconds
 
     # Optional metadata
-    resolution: Optional[tuple[int, int]] = None  # (width, height)
-    fps: Optional[float] = None
-    audio_sample_rate: Optional[int] = None
-    audio_channels: Optional[int] = None
+    resolution: tuple[int, int] | None = None  # (width, height)
+    fps: float | None = None
+    audio_sample_rate: int | None = None
+    audio_channels: int | None = None
 
     # Computed properties (populated during processing)
     quality_score: Optional['QualityScore'] = None
     alignment_offset: float = 0.0  # seconds
-    people_count: Optional[int] = None
+    people_count: int | None = None
 
 
 @dataclass
@@ -53,8 +53,8 @@ class QualityMetrics:
     clipping_rate: float  # Clipping rate (0.0-1.0)
 
     # Optional additional metrics
-    dynamic_range_db: Optional[float] = None
-    snr_db: Optional[float] = None  # Signal-to-noise ratio
+    dynamic_range_db: float | None = None
+    snr_db: float | None = None  # Signal-to-noise ratio
 
 
 @dataclass
@@ -63,7 +63,7 @@ class QualityScore:
 
     overall: float  # 0.0-1.0
     metrics: QualityMetrics
-    weights: Dict[str, float]
+    weights: dict[str, float]
 
     # Component scores
     rms_score: float = 0.0
@@ -81,8 +81,8 @@ class AlignmentResult:
     method: str  # 'gcc-phat'
 
     # Optional details
-    correlation_peak: Optional[float] = None
-    drift_seconds_per_second: Optional[float] = None
+    correlation_peak: float | None = None
+    drift_seconds_per_second: float | None = None
     num_windows: int = 1
 
 
@@ -93,8 +93,8 @@ class SpeechSegment:
     start: float  # seconds
     end: float  # seconds
     speaker: str
-    text: Optional[str] = None
-    confidence: Optional[float] = None
+    text: str | None = None
+    confidence: float | None = None
 
 
 @dataclass
@@ -109,16 +109,16 @@ class CompositionSegment:
     audio_source: str  # Camera ID for audio
 
     # Optional context
-    reason: Optional[str] = None  # Why this camera was selected
+    reason: str | None = None  # Why this camera was selected
     speech_active: bool = False
-    people_count: Optional[int] = None
-    quality_score: Optional[float] = None
+    people_count: int | None = None
+    quality_score: float | None = None
     needs_review: bool = False  # Flag for manual review
 
 
 # Type aliases for clarity
-Timeline = List[CompositionSegment]
-ClipCollection = List[CameraClip]
+Timeline = list[CompositionSegment]
+ClipCollection = list[CameraClip]
 
 
 __all__ = [

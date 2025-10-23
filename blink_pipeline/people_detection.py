@@ -6,22 +6,23 @@ People detection utilities with multiple backends:
 Optimized for Apple Silicon with automatic backend selection.
 """
 from __future__ import annotations
-from dataclasses import dataclass
-from typing import Optional, Any, Literal
+
 import logging
 import sys
 import threading
-from PIL import Image
+from dataclasses import dataclass
+from typing import Any, Literal
 
 import torch
+from PIL import Image
 from transformers import AutoImageProcessor, AutoModelForObjectDetection
 
 # Apple Vision framework (macOS only)
 try:
     if sys.platform == "darwin":
+        import objc  # type: ignore
         import Vision  # type: ignore
         from Quartz import CIImage  # type: ignore
-        import objc  # type: ignore
         VISION_AVAILABLE = True
     else:
         Vision = None  # type: ignore
@@ -38,7 +39,7 @@ except Exception:  # pragma: no cover
 class PeopleDetectorConfig:
     backend: Literal["auto", "vision", "huggingface"] = "auto"
     model_name: str = "hustvl/yolos-tiny"
-    revision: Optional[str] = None
+    revision: str | None = None
     score_threshold: float = 0.7
 
 class VisionPeopleDetector:
@@ -49,7 +50,7 @@ class VisionPeopleDetector:
     No model downloads or GPU memory required. macOS-only.
     """
 
-    def __init__(self, config: Optional[PeopleDetectorConfig] = None) -> None:
+    def __init__(self, config: PeopleDetectorConfig | None = None) -> None:
         self.config = config or PeopleDetectorConfig()
         if not VISION_AVAILABLE:
             raise RuntimeError(
@@ -100,7 +101,7 @@ class VisionPeopleDetector:
 class HuggingFacePeopleDetector:
     """Counts people in images using a Hugging Face object detection model with MPS support."""
 
-    def __init__(self, config: Optional[PeopleDetectorConfig] = None) -> None:
+    def __init__(self, config: PeopleDetectorConfig | None = None) -> None:
         self.config = config or PeopleDetectorConfig()
         self._processor: Any = None
         self._model: Any = None
@@ -188,7 +189,7 @@ class PeopleDetector:
     The 'auto' mode prefers Vision on macOS when available, falls back to HuggingFace.
     """
 
-    def __init__(self, config: Optional[PeopleDetectorConfig] = None) -> None:
+    def __init__(self, config: PeopleDetectorConfig | None = None) -> None:
         self.config = config or PeopleDetectorConfig()
         self._detector: Any = None
         self._backend: str = ""

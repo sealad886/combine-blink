@@ -10,8 +10,8 @@ Author: Phase 4 implementation
 Status: Stub - to be implemented
 """
 
-from typing import Optional
 from datetime import datetime, timedelta
+
 from .config import TimestampOverlayConfig
 from .models import CompositionSegment
 
@@ -34,7 +34,7 @@ class OverlayGenerator:
     def build_review_indicator_filter(
         self,
         segment: CompositionSegment
-    ) -> Optional[str]:
+    ) -> str | None:
         """Build FFmpeg filter for review indicator if needed."""
         raise NotImplementedError("Phase 4 implementation pending")
 

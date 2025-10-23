@@ -1,18 +1,16 @@
 import logging
 import os
-import sys
 import shutil
+import sys
 import tempfile
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import numpy as np
-
-from blink_pipeline.media_utils import extract_audio_segment
-from blink_pipeline.av_alignment import estimate_per_clip_offsets
-
 import torch
 from pyannote.audio import Inference, Model
+
+from blink_pipeline.media_utils import extract_audio_segment
 
 
 @dataclass
@@ -26,7 +24,7 @@ class SpeakerEmbeddingSettings:
 class SpeakerIdentifier:
     """Resolves diarized speaker labels to persistent identities and saves samples."""
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: dict[str, Any]):
         if Inference is None or Model is None:
             raise RuntimeError(
                 "pyannote.audio must be installed to enable speaker identification."
@@ -46,7 +44,7 @@ class SpeakerIdentifier:
 
         # Load embedding model with authentication (supports both legacy and new API)
         model = None
-        load_error: Optional[Exception] = None
+        load_error: Exception | None = None
         try:
             # pyannote.audio >= 3.1 used `use_auth_token`
             model = Model.from_pretrained(
@@ -96,8 +94,8 @@ class SpeakerIdentifier:
                 exc_info=True,
             )
 
-        self.voiceprints: Dict[str, np.ndarray] = {}
-        self.label_aliases: Dict[str, str] = {}
+        self.voiceprints: dict[str, np.ndarray] = {}
+        self.label_aliases: dict[str, str] = {}
         self.known_speakers_map = (
             (config.get("speakers", {}) or {}).get("known_speakers", {})
         )
@@ -106,7 +104,7 @@ class SpeakerIdentifier:
         self._load_existing_voiceprints()
 
     def process_transcript(
-        self, transcript: List[Dict[str, Any]], timeline: List[Dict[str, Any]]
+        self, transcript: list[dict[str, Any]], timeline: list[dict[str, Any]]
     ) -> None:
         """Mutates transcript entries to use persistent speaker IDs and stores samples."""
 
@@ -139,10 +137,10 @@ class SpeakerIdentifier:
             logging.info(f"    → Processed {len(unique_diar_labels)} unique speaker(s) in this clip")
             logging.info(f"    → Total known speakers: {len(self.voiceprints)}")
 
-    def substitute_names_in_transcript(self, transcript: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def substitute_names_in_transcript(self, transcript: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Replace speaker IDs with configured human-readable names where available."""
 
-        named_transcript: List[Dict[str, Any]] = []
+        named_transcript: list[dict[str, Any]] = []
         for entry in transcript:
             speaker_id = entry.get("speaker")
             speaker_name = self.known_speakers_map.get(speaker_id, speaker_id)
@@ -155,7 +153,7 @@ class SpeakerIdentifier:
     # Internal helpers
     # ---------------------------------------------------------------------
 
-    def _parse_settings(self, config: Dict[str, Any]) -> SpeakerEmbeddingSettings:
+    def _parse_settings(self, config: dict[str, Any]) -> SpeakerEmbeddingSettings:
         model_id = config.get("embedding_model_id", "pyannote/wespeaker-voxceleb-resnet34-LM")
         token = config.get("auth_token")
         token_env = config.get("auth_token_env", ["HUGGINGFACE_TOKEN", "HF_TOKEN"])
@@ -238,8 +236,8 @@ class SpeakerIdentifier:
             self.next_index = max(indices) + 1
 
     def _resolve_speaker_identity(
-        self, segment: Dict[str, Any], timeline: List[Dict[str, Any]]
-    ) -> Optional[str]:
+        self, segment: dict[str, Any], timeline: list[dict[str, Any]]
+    ) -> str | None:
         for clip in timeline:
             if not clip.get("has_audio"):
                 continue
@@ -298,7 +296,7 @@ class SpeakerIdentifier:
 
         return None
 
-    def _embed_file(self, audio_path: str) -> Optional[np.ndarray]:
+    def _embed_file(self, audio_path: str) -> np.ndarray | None:
         try:
             embedding = self.embedding_model(audio_path)
         except Exception as exc:  # pragma: no cover - defensive logging
@@ -324,8 +322,8 @@ class SpeakerIdentifier:
             return None
         return vector / norm
 
-    def _match_voiceprint(self, embedding: np.ndarray) -> Tuple[Optional[str], float]:
-        best_id: Optional[str] = None
+    def _match_voiceprint(self, embedding: np.ndarray) -> tuple[str | None, float]:
+        best_id: str | None = None
         best_score: float = -1.0
         for speaker_id, stored_embedding in self.voiceprints.items():
             score = float(np.dot(embedding, stored_embedding))

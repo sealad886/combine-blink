@@ -2,17 +2,17 @@
 
 import time
 from datetime import timedelta
-from typing import Dict, Optional
-from rich.progress import (
-    Progress,
-    TextColumn,
-    BarColumn,
-    TaskProgressColumn,
-    TimeRemainingColumn,
-    TimeElapsedColumn,
-    SpinnerColumn,
-)
+
 from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
 
 
 class ProgressTracker:
@@ -37,7 +37,7 @@ class ProgressTracker:
 
         # Rich console and progress instances
         self.console = Console()
-        self.progress: Optional[Progress] = None
+        self.progress: Progress | None = None
 
         # Task IDs for Rich progress tracking
         self.transcription_task = None
@@ -75,7 +75,7 @@ class ProgressTracker:
         else:
             return f"{secs}s"
 
-    def start_stage(self, stage_num: int, total_items: Optional[int] = None):
+    def start_stage(self, stage_num: int, total_items: int | None = None):
         """Mark the start of a pipeline stage."""
         self.current_stage = stage_num
         stage_name = self.stage_names[stage_num - 1]
@@ -84,7 +84,7 @@ class ProgressTracker:
         self.console.print(f"[bold green]🚀 STAGE {stage_num}/5: {stage_name.upper()}")
         self.console.print(f"[bold cyan]{'='*80}\n")
 
-    def update_stage_progress(self, stage_num: int, completed: int, message: Optional[str] = None):
+    def update_stage_progress(self, stage_num: int, completed: int, message: str | None = None):
         """Update progress for the current stage.
 
         Note: When using multiprocessing, this method is called from the main process
@@ -94,7 +94,7 @@ class ProgressTracker:
         # The actual updates happen via the shared progress dict in multiprocessing scenarios
         pass
 
-    def complete_stage(self, stage_num: int, success_count: Optional[int] = None):
+    def complete_stage(self, stage_num: int, success_count: int | None = None):
         """Mark a stage as complete."""
         stage_name = self.stage_names[stage_num - 1]
         self.console.print(f"\n[bold green]✅ {stage_name} completed!")
@@ -106,7 +106,7 @@ class ProgressTracker:
         total_time = time.time() - self.pipeline_start_time
 
         self.console.print(f"\n[bold cyan]{'='*80}")
-        self.console.print(f"[bold green]✨ PIPELINE COMPLETED SUCCESSFULLY! ✨")
+        self.console.print("[bold green]✨ PIPELINE COMPLETED SUCCESSFULLY! ✨")
         self.console.print(f"[bold cyan]{'='*80}\n")
         self.console.print("[bold yellow]📊 SUMMARY:")
         self.console.print(f"  [cyan]• Total time: {self._format_time(total_time)}")

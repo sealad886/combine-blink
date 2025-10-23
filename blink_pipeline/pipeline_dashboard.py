@@ -12,24 +12,22 @@ Statistics for each stage
 Real-time status updates
 """
 
-from typing import Tuple, Dict, Optional, List, Any
-import copy
 import time
-from datetime import datetime, timedelta
 from dataclasses import dataclass, field
+from datetime import timedelta
 from enum import Enum
+from typing import Any
+
+from rich import box
 from rich.console import Console
-from rich.live import Live
 from rich.layout import Layout
+from rich.live import Live
 from rich.panel import Panel
-from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, SpinnerColumn
+from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 from rich.table import Table
 from rich.text import Text
-from rich import box
 
 from .stages import StageKey, validate_stage_key
-
-
 
 
 class StageStatus(Enum):
@@ -47,10 +45,10 @@ class StageInfo:
     status: StageStatus = StageStatus.PENDING
     total: int = 0
     completed: int = 0
-    start_time: Optional[float] = None
-    end_time: Optional[float] = None
+    start_time: float | None = None
+    end_time: float | None = None
     details: str = ""
-    substages: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    substages: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 STAGE_DEFINITIONS = [
@@ -88,7 +86,7 @@ class PipelineDashboard:
         self.start_time = time.time()
 
         # Stage tracking (single source of truth from STAGE_DEFINITIONS)
-        self.stages: Dict[str, StageInfo] = {}
+        self.stages: dict[str, StageInfo] = {}
         for key, name in STAGE_DEFINITIONS:
             if key == "validation":
                 total = total_videos
@@ -101,11 +99,11 @@ class PipelineDashboard:
             self.stages[key] = StageInfo(name, total=total)
 
         # Current stage
-        self.current_stage: Optional[str] = None
+        self.current_stage: str | None = None
 
         # Live display
-        self.live: Optional[Live] = None
-        self.layout: Optional[Layout] = None
+        self.live: Live | None = None
+        self.layout: Layout | None = None
 
         # Progress bars
         self.progress = Progress(
@@ -117,7 +115,7 @@ class PipelineDashboard:
             TextColumn("{task.completed}/{task.total}"),
             TimeRemainingColumn(),
         )
-        self.progress_tasks: Dict[str, Any] = {}
+        self.progress_tasks: dict[str, Any] = {}
 
     def set_stage_total(self, stage_key: str, total: int):
         """
@@ -157,7 +155,7 @@ class PipelineDashboard:
                 stage.details = details
             self.update()
 
-    def get_stage_timings(self) -> Dict[str, Tuple[float, float, float]]:
+    def get_stage_timings(self) -> dict[str, tuple[float, float, float]]:
         """
         Get timing info for each stage.
         Returns a dict: {stage_key: (start_time, end_time, duration)}
@@ -250,7 +248,7 @@ class PipelineDashboard:
         table.add_column("Progress", width=40)
         table.add_column("Time", style="dim")
 
-        for stage_key, stage in self.stages.items():
+        for _stage_key, stage in self.stages.items():
             # Status indicator
             if stage.status == StageStatus.COMPLETE:
                 status = Text("✓ Complete", style="green")
@@ -265,7 +263,6 @@ class PipelineDashboard:
 
             # Progress bar
             if stage.total > 0:
-                pct = (stage.completed / stage.total) * 100
                 bar_width = 30
                 filled = int((stage.completed / stage.total) * bar_width)
                 bar = "█" * filled + "░" * (bar_width - filled)
@@ -333,7 +330,6 @@ class PipelineDashboard:
                 if info.get('visible', True):
                     completed = info.get('progress', 0)
                     total = info.get('total', 1)
-                    pct = (completed / total * 100) if total > 0 else 0
 
                     # Mini progress bar (compact)
                     bar_width = 10
@@ -418,7 +414,7 @@ class PipelineDashboard:
         # Update footer
         self.layout["footer"].update(self._make_stats_panel())
 
-    def start_stage(self, stage_key: str, total: Optional[int] = None):
+    def start_stage(self, stage_key: str, total: int | None = None):
         """
         Start a pipeline stage.
 

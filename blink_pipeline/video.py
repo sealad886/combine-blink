@@ -2,8 +2,9 @@ import logging
 import os
 import subprocess
 import tempfile
-from typing import List
+
 from blink_pipeline.media_utils import probe_media_info
+
 
 def _hw_encode_enabled() -> bool:
     return os.environ.get("CB_USE_HW", "1") == "1"
@@ -12,7 +13,7 @@ def _hw_codec() -> str:
     # h264_videotoolbox | hevc_videotoolbox
     return os.environ.get("CB_HW_CODEC", "h264_videotoolbox")
 
-def merge_video_clips(video_paths: List[str], output_path: str, crossfade_duration: float) -> bool:
+def merge_video_clips(video_paths: list[str], output_path: str, crossfade_duration: float) -> bool:
     """Merge clips sequentially, delegating heavy lifting to ffmpeg for low RAM usage."""
     if not video_paths:
         logging.warning("No video paths provided for merging.")

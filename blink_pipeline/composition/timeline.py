@@ -17,9 +17,9 @@ Status: Stub - to be implemented
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional, List
-from .models import CameraClip, CompositionSegment, SpeechSegment, Timeline
+
 from .config import CompositionConfig
+from .models import CameraClip, SpeechSegment, Timeline
 
 
 class TimelineStrategy(ABC):
@@ -32,8 +32,8 @@ class TimelineStrategy(ABC):
     @abstractmethod
     def generate(
         self,
-        clips: List[CameraClip],
-        speech_segments: Optional[List[SpeechSegment]] = None
+        clips: list[CameraClip],
+        speech_segments: list[SpeechSegment] | None = None
     ) -> Timeline:
         """Generate composition timeline."""
         pass
@@ -44,8 +44,8 @@ class TimeBasedStrategy(TimelineStrategy):
 
     def generate(
         self,
-        clips: List[CameraClip],
-        speech_segments: Optional[List[SpeechSegment]] = None
+        clips: list[CameraClip],
+        speech_segments: list[SpeechSegment] | None = None
     ) -> Timeline:
         """Generate time-based timeline."""
         raise NotImplementedError("Phase 3 implementation pending")
@@ -56,8 +56,8 @@ class RoundRobinStrategy(TimelineStrategy):
 
     def generate(
         self,
-        clips: List[CameraClip],
-        speech_segments: Optional[List[SpeechSegment]] = None
+        clips: list[CameraClip],
+        speech_segments: list[SpeechSegment] | None = None
     ) -> Timeline:
         """Generate round-robin timeline."""
         raise NotImplementedError("Phase 3 implementation pending")
@@ -68,8 +68,8 @@ class AudioQualityStrategy(TimelineStrategy):
 
     def generate(
         self,
-        clips: List[CameraClip],
-        speech_segments: Optional[List[SpeechSegment]] = None
+        clips: list[CameraClip],
+        speech_segments: list[SpeechSegment] | None = None
     ) -> Timeline:
         """Generate audio-quality-based timeline."""
         raise NotImplementedError("Phase 3 implementation pending")
@@ -80,8 +80,8 @@ class SpeechPeopleStrategy(TimelineStrategy):
 
     def generate(
         self,
-        clips: List[CameraClip],
-        speech_segments: Optional[List[SpeechSegment]] = None
+        clips: list[CameraClip],
+        speech_segments: list[SpeechSegment] | None = None
     ) -> Timeline:
         """Generate speech-people timeline."""
         raise NotImplementedError("Phase 3 implementation pending")
@@ -111,8 +111,8 @@ class TimelineGenerator:
 
     def generate(
         self,
-        clips: List[CameraClip],
-        speech_segments: Optional[List[SpeechSegment]] = None
+        clips: list[CameraClip],
+        speech_segments: list[SpeechSegment] | None = None
     ) -> Timeline:
         """Generate composition timeline using selected strategy."""
         return self._strategy.generate(clips, speech_segments)

@@ -1,6 +1,6 @@
 # Pipeline Overview
 
-The Blink pipeline is orchestrated by `src/orchestrator.py` and processes each
+The Blink pipeline is orchestrated by `blink_pipeline/orchestrator.py` and processes each
 run through five logical stages (with Stage 0 inserted after discovery/grouping
 so repairs happen exactly once). The Rich dashboard (`PipelineDashboard`) wraps
 the whole session and exposes per-stage progress, ETA, and resume metadata; see
@@ -8,12 +8,12 @@ the whole session and exposes per-stage progress, ETA, and resume metadata; see
 
 | Order | Stage name                     | Key module(s)                | Parallelism | Resume behaviour |
 |-------|--------------------------------|------------------------------|-------------|------------------|
-| 1     | File discovery                 | `src/discovery.py`           | serial      | n/a              |
-| 2     | Video grouping                 | `src/grouping.py`            | serial      | n/a              |
-| 0     | Video validation & repair      | `src/media_validation.py`    | process pool (`validation_workers`) | Cached by hashed filename |
-| 3     | Transcription & diarization    | `src/transcription.py`       | process pool (`transcription_workers`) | Skips groups with existing transcripts |
-| 4     | Speaker identification         | `src/identify_speaker.py`    | serial      | Uses Stage 3 outputs |
-| 5     | Video merging / composition    | `src/multi_camera_composer.py`, `src/video.py` | process pool (`merge_workers`) | Skips groups with existing merged video |
+| 1     | File discovery                 | `blink_pipeline/discovery.py`           | serial      | n/a              |
+| 2     | Video grouping                 | `blink_pipeline/grouping.py`            | serial      | n/a              |
+| 0     | Video validation & repair      | `blink_pipeline/media_validation.py`    | process pool (`validation_workers`) | Cached by hashed filename |
+| 3     | Transcription & diarization    | `blink_pipeline/transcription.py`       | process pool (`transcription_workers`) | Skips groups with existing transcripts |
+| 4     | Speaker identification         | `blink_pipeline/identify_speaker.py`    | serial      | Uses Stage 3 outputs |
+| 5     | Video merging / composition    | `blink_pipeline/multi_camera_composer.py`, `blink_pipeline/video.py` | process pool (`merge_workers`) | Skips groups with existing merged video |
 
 ## Stage 1 — File Discovery
 
@@ -34,7 +34,7 @@ the whole session and exposes per-stage progress, ETA, and resume metadata; see
 
 ## Stage 0 — Validation & Repair
 
-Implemented in `src/media_validation.py` and initiated right after grouping.
+Implemented in `blink_pipeline/media_validation.py` and initiated right after grouping.
 
 - Collects all unique clip paths across groups, then runs `preprocess_videos`
   inside a `ProcessPoolExecutor`.

@@ -13,10 +13,11 @@ Status: Stub - to be implemented
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional, Callable
+from collections.abc import Callable
 from pathlib import Path
-from .models import Timeline, CameraClip
+
 from .config import CompositionConfig
+from .models import CameraClip, Timeline
 
 
 class CompositionRenderer(ABC):
@@ -32,7 +33,7 @@ class CompositionRenderer(ABC):
         clips: list[CameraClip],
         timeline: Timeline,
         output_path: Path,
-        progress_callback: Optional[Callable[[float], None]] = None
+        progress_callback: Callable[[float], None] | None = None
     ) -> bool:
         """Render composition to output file."""
         pass
@@ -54,7 +55,7 @@ class SinglePassRenderer(CompositionRenderer):
         clips: list[CameraClip],
         timeline: Timeline,
         output_path: Path,
-        progress_callback: Optional[Callable[[float], None]] = None
+        progress_callback: Callable[[float], None] | None = None
     ) -> bool:
         """Render in one pass using filter_complex."""
         raise NotImplementedError("Phase 4 implementation pending")
@@ -68,7 +69,7 @@ class MultiPassRenderer(CompositionRenderer):
         clips: list[CameraClip],
         timeline: Timeline,
         output_path: Path,
-        progress_callback: Optional[Callable[[float], None]] = None
+        progress_callback: Callable[[float], None] | None = None
     ) -> bool:
         """Render in multiple passes."""
         raise NotImplementedError("Phase 4 implementation pending")

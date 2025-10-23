@@ -2,7 +2,7 @@
 
 Stage 0 ensures every discovered clip is probed, repaired when necessary, and
 cached before the heavy transcription work begins. Implementation lives in
-`src/media_validation.py`.
+`blink_pipeline/media_validation.py`.
 
 ## Goals
 

@@ -1,10 +1,11 @@
+import logging
 import os
 import re
 from datetime import datetime
-from typing import List, Dict, Any, Optional
-import logging
+from typing import Any
 
-def parse_date_from_directory(dir_path: str, date_patterns: Optional[List[str]] = None) -> Optional[datetime]:
+
+def parse_date_from_directory(dir_path: str, date_patterns: list[str] | None = None) -> datetime | None:
     """
     Attempts to parse a date from a directory name using common date formats.
 
@@ -35,7 +36,7 @@ def parse_date_from_directory(dir_path: str, date_patterns: Optional[List[str]] 
     return None
 
 
-def discover_files(input_dir: str, pattern: str, config: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+def discover_files(input_dir: str, pattern: str, config: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """
     Recursively finds all video files in the input directory that match the
     Blink filename pattern.

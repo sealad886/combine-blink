@@ -10,11 +10,8 @@ import json
 import logging
 import os
 import subprocess
-import tempfile
 from pathlib import Path
-from typing import Dict, Any, Optional, List
-
-logger = logging.getLogger(__name__)
+from typing import Any
 
 
 class WhisperCppWrapper:
@@ -28,7 +25,7 @@ class WhisperCppWrapper:
     def __init__(
         self,
         model_path: str,
-        whisper_cpp_binary: Optional[str] = None,
+        whisper_cpp_binary: str | None = None,
         device: str = "auto",
         compute_type: str = "default"
     ):
@@ -54,7 +51,9 @@ class WhisperCppWrapper:
         self.binary = self._find_whisper_cpp_binary(whisper_cpp_binary)
         self.device = device
 
-        logger.info(f"Initialized whisper.cpp wrapper: binary={self.binary}, model={self.model_path}")
+        logging.getLogger(__name__).info(
+            f"Initialized whisper.cpp wrapper: binary={self.binary}, model={self.model_path}"
+        )
 
     def _compile_mlpackage_if_needed(self, mlpackage_path: Path) -> Path:
         """
@@ -69,13 +68,15 @@ class WhisperCppWrapper:
         mlmodelc_path = mlpackage_path.with_suffix('.mlmodelc')
 
         if mlmodelc_path.exists():
-            logger.info(f"Using existing compiled Core ML model: {mlmodelc_path}")
+            logging.getLogger(__name__).info(f"Using existing compiled Core ML model: {mlmodelc_path}")
             return mlmodelc_path
 
-        logger.info(f"Compiling Core ML model from {mlpackage_path} to {mlmodelc_path}...")
+        logging.getLogger(__name__).info(
+            f"Compiling Core ML model from {mlpackage_path} to {mlmodelc_path}..."
+        )
 
         try:
-            result = subprocess.run(
+            subprocess.run(
                 [
                     "xcrun",
                     "coremlcompiler",
@@ -88,19 +89,19 @@ class WhisperCppWrapper:
                 check=True,
                 timeout=120
             )
-            logger.info(f"Successfully compiled Core ML model to {mlmodelc_path}")
+            logging.getLogger(__name__).info(f"Successfully compiled Core ML model to {mlmodelc_path}")
             return mlmodelc_path
         except subprocess.CalledProcessError as e:
             raise RuntimeError(
                 f"Failed to compile Core ML model: {e.stderr}\n"
                 "Ensure Xcode command-line tools are installed: xcode-select --install"
-            )
-        except FileNotFoundError:
+            ) from e
+        except FileNotFoundError as e:
             raise RuntimeError(
                 "coremlcompiler not found. Install Xcode command-line tools: xcode-select --install"
-            )
+            ) from e
 
-    def _find_whisper_cpp_binary(self, binary_path: Optional[str]) -> str:
+    def _find_whisper_cpp_binary(self, binary_path: str | None) -> str:
         """
         Find whisper.cpp binary in common locations.
 
@@ -140,7 +141,7 @@ class WhisperCppWrapper:
                     check=False
                 )
                 if result.returncode in (0, 1):  # Help command may return 1
-                    logger.info(f"Found whisper.cpp binary: {candidate}")
+                    logging.getLogger(__name__).info(f"Found whisper.cpp binary: {candidate}")
                     return candidate
             except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError):
                 continue
@@ -153,10 +154,10 @@ class WhisperCppWrapper:
     def transcribe(
         self,
         audio_path: str,
-        language: Optional[str] = "en",
+        language: str | None = "en",
         task: str = "transcribe",
         **kwargs
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Transcribe audio using whisper.cpp.
 
@@ -199,7 +200,7 @@ class WhisperCppWrapper:
             cmd.extend(["-t", str(os.cpu_count() or 4)])
 
         # Execute whisper.cpp
-        logger.debug(f"Executing whisper.cpp: {' '.join(cmd)}")
+        logging.getLogger(__name__).debug(f"Executing whisper.cpp: {' '.join(cmd)}")
 
         try:
             result = subprocess.run(
@@ -210,15 +211,15 @@ class WhisperCppWrapper:
                 check=True
             )
         except subprocess.CalledProcessError as e:
-            logger.error(f"whisper.cpp failed: {e.stderr}")
-            raise RuntimeError(f"whisper.cpp transcription failed: {e.stderr}")
-        except subprocess.TimeoutExpired:
-            raise RuntimeError("whisper.cpp transcription timed out (>10 minutes)")
+            logging.getLogger(__name__).error(f"whisper.cpp failed: {e.stderr}")
+            raise RuntimeError(f"whisper.cpp transcription failed: {e.stderr}") from e
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError("whisper.cpp transcription timed out (>10 minutes)") from e
 
         # Parse output
         return self._parse_output(result.stdout, result.stderr, audio_path)
 
-    def _parse_output(self, stdout: str, stderr: str, audio_path: str) -> Dict[str, Any]:
+    def _parse_output(self, stdout: str, stderr: str, audio_path: str) -> dict[str, Any]:
         """
         Parse whisper.cpp output into openai-whisper compatible format.
 
@@ -237,7 +238,7 @@ class WhisperCppWrapper:
         try:
             if json_output.exists():
                 # Load JSON output
-                with open(json_output, 'r', encoding='utf-8') as f:
+                with open(json_output, encoding='utf-8') as f:
                     data = json.load(f)
 
                 # Convert to openai-whisper format
@@ -267,15 +268,15 @@ class WhisperCppWrapper:
                 return result
             else:
                 # Fallback: parse plain text output
-                logger.warning("JSON output not found, parsing plain text")
+                logging.getLogger(__name__).warning("JSON output not found, parsing plain text")
                 return self._parse_plain_text(stdout)
 
         except Exception as e:
-            logger.error(f"Failed to parse whisper.cpp output: {e}")
+            logging.getLogger(__name__).error(f"Failed to parse whisper.cpp output: {e}")
             # Return minimal result from plain text
             return self._parse_plain_text(stdout)
 
-    def _parse_plain_text(self, output: str) -> Dict[str, Any]:
+    def _parse_plain_text(self, output: str) -> dict[str, Any]:
         """
         Parse plain text output from whisper.cpp.
 

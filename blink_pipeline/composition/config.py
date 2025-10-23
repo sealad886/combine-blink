@@ -15,7 +15,8 @@ Classes:
 Author: Phase 1 implementation
 """
 
-from typing import Optional, List, Dict, Any
+from typing import Any
+
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -57,8 +58,8 @@ class PeopleDetectionConfig(BaseModel):
     sample_frames: int = Field(default=12, gt=0, description="Number of frames to sample")
     resize_width: int = Field(default=480, gt=0, description="Resize width for detection")
     min_frame_width: int = Field(default=320, gt=0, description="Minimum frame width")
-    model_name: Optional[str] = Field(default='hustvl/yolos-tiny', description="HuggingFace model name")
-    revision: Optional[str] = Field(default=None, description="Model revision")
+    model_name: str | None = Field(default='hustvl/yolos-tiny', description="HuggingFace model name")
+    revision: str | None = Field(default=None, description="Model revision")
     score_threshold: float = Field(default=0.65, ge=0.0, le=1.0, description="Detection confidence threshold")
     min_count: int = Field(default=1, ge=0, description="Minimum people count for selection")
 
@@ -79,8 +80,8 @@ class EncodingConfig(BaseModel):
 
     use_hw_encode: bool = Field(default=True, description="Use hardware encoding")
     hw_codec: str = Field(default='h264_videotoolbox', description="Hardware codec")
-    x264_preset: Optional[str] = Field(default=None, description="Software encoding preset")
-    x264_crf: Optional[int] = Field(default=None, ge=0, le=51, description="Software encoding CRF")
+    x264_preset: str | None = Field(default=None, description="Software encoding preset")
+    x264_crf: int | None = Field(default=None, ge=0, le=51, description="Software encoding CRF")
     bitrate: str = Field(default='8000k', description="Target bitrate")
 
 
@@ -96,7 +97,7 @@ class AudioCleanupConfig(BaseModel):
     loudnorm_target_i: float = Field(default=-23.0, description="Target integrated loudness (LUFS)")
     loudnorm_target_tp: float = Field(default=-2.0, description="Target true peak (dBTP)")
     loudnorm_target_lra: float = Field(default=11.0, description="Target loudness range (LU)")
-    extra_filters: List[str] = Field(default_factory=list, description="Additional FFmpeg filters")
+    extra_filters: list[str] = Field(default_factory=list, description="Additional FFmpeg filters")
 
 
 class CompositionConfig(BaseModel):
@@ -145,7 +146,7 @@ class CompositionConfig(BaseModel):
         return v
 
     @classmethod
-    def from_dict(cls, config_dict: Dict[str, Any]) -> 'CompositionConfig':
+    def from_dict(cls, config_dict: dict[str, Any]) -> 'CompositionConfig':
         """Create CompositionConfig from dictionary (e.g., from YAML)."""
         return cls(**config_dict)
 

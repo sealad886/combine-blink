@@ -8,7 +8,6 @@ This script:
 3. Creates a proper test_repairs directory for test outputs
 """
 
-import os
 import shutil
 from pathlib import Path
 

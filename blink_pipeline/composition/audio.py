@@ -10,9 +10,8 @@ Author: Phase 4 implementation
 Status: Stub - to be implemented
 """
 
-from typing import Optional, List
-from pathlib import Path
 import numpy as np
+
 from .config import AudioCleanupConfig
 
 

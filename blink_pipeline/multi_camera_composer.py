@@ -10,31 +10,31 @@ FEATURE FLAG: use_modular_composition
   blink_pipeline.composition instead of the legacy monolithic implementation.
 """
 
+import io
+import json
 import logging
 import os
 import re
 import subprocess
 import tempfile
-import json
-import io
-from datetime import datetime, timedelta
-from typing import Callable, List, Dict, Any, Tuple, Optional
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
-import numpy as np
+from typing import Any
 
+import numpy as np
 from PIL import Image
 
-from blink_pipeline.media_utils import probe_media_info
-from blink_pipeline.av_alignment import estimate_offsets_and_drift, estimate_per_clip_offsets
-from blink_pipeline.people_detection import PeopleDetector, PeopleDetectorConfig
+from blink_pipeline.av_alignment import estimate_per_clip_offsets
 
 # Modular composition imports (Phase 2)
 from blink_pipeline.composition.alignment import (
     AlignmentConfig,
-    AlignmentEngine,
-    CachedAlignmentEngine
+    CachedAlignmentEngine,
 )
+from blink_pipeline.media_utils import probe_media_info
+from blink_pipeline.people_detection import PeopleDetector, PeopleDetectorConfig
 
 
 @dataclass
@@ -67,7 +67,7 @@ class MultiCameraComposer:
     camera switching and optimal audio selection.
     """
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: dict[str, Any]):
         """
         Initialize the composer with configuration.
 
@@ -85,8 +85,8 @@ class MultiCameraComposer:
         # Initialize modular quality analyzer if feature flag is enabled
         if self._use_modular_composition:
             from blink_pipeline.composition import (
-                FFmpegAudioQualityAnalyzer,
                 CachedQualityAnalyzer,
+                FFmpegAudioQualityAnalyzer,
             )
 
             # Determine cache directory for quality analysis
@@ -160,8 +160,8 @@ class MultiCameraComposer:
         self._alignment_hop: float = float(self.alignment_config.get('hop_seconds', max(0.1, self._alignment_window / 2.0)))
         self._alignment_estimate_drift: bool = bool(self.alignment_config.get('estimate_drift', True))
         # Storage for per-camera alignment metadata
-        self._alignment_offsets: Dict[str, float] = {}
-        self._alignment_drifts: Dict[str, float] = {}
+        self._alignment_offsets: dict[str, float] = {}
+        self._alignment_drifts: dict[str, float] = {}
 
         # Initialize modular alignment engine if feature flag is enabled
         if self._use_modular_composition and self._alignment_enabled:
@@ -203,8 +203,8 @@ class MultiCameraComposer:
         self._people_min_frame_width: int = max(160, int(self.people_config.get('min_frame_width', 320)))
         self._people_min_count: int = max(0, int(self.people_config.get('min_count', 1)))
         # Hugging Face people detector (lazy) and cache
-        self._people_detector: Optional[PeopleDetector] = None
-        self._people_counts_cache: Dict[Tuple[str, int], int] = {}
+        self._people_detector: PeopleDetector | None = None
+        self._people_counts_cache: dict[tuple[str, int], int] = {}
 
         # Timestamp overlay configuration
         self.overlay_config = self.composition_config.get('timestamp_overlay', {
@@ -238,7 +238,7 @@ class MultiCameraComposer:
         cleanup_cfg = cleanup_defaults.copy()
         cleanup_cfg.update(self.composition_config.get('audio_cleanup', {}))
 
-        def _float_or_none(value: Any) -> Optional[float]:
+        def _float_or_none(value: Any) -> float | None:
             if value is None:
                 return None
             try:
@@ -247,10 +247,10 @@ class MultiCameraComposer:
                 return None
 
         self._cleanup_enabled: bool = bool(cleanup_cfg.get('enabled', True))
-        self._cleanup_highpass: Optional[float] = _float_or_none(cleanup_cfg.get('highpass_hz'))
+        self._cleanup_highpass: float | None = _float_or_none(cleanup_cfg.get('highpass_hz'))
         if self._cleanup_highpass is not None and self._cleanup_highpass <= 0:
             self._cleanup_highpass = None
-        self._cleanup_lowpass: Optional[float] = _float_or_none(cleanup_cfg.get('lowpass_hz'))
+        self._cleanup_lowpass: float | None = _float_or_none(cleanup_cfg.get('lowpass_hz'))
         if self._cleanup_lowpass is not None and self._cleanup_lowpass <= 0:
             self._cleanup_lowpass = None
         self._cleanup_denoise: bool = bool(cleanup_cfg.get('denoise', True))
@@ -267,15 +267,15 @@ class MultiCameraComposer:
         extra_filters = cleanup_cfg.get('extra_filters', [])
         if isinstance(extra_filters, str):
             extra_filters = [extra_filters]
-        self._cleanup_extra_filters: List[str] = [str(f) for f in extra_filters if f]
+        self._cleanup_extra_filters: list[str] = [str(f) for f in extra_filters if f]
         custom_filter = cleanup_cfg.get('custom_filter')
-        self._cleanup_custom_filter: Optional[str] = str(custom_filter) if custom_filter else None
-        self._cleanup_filter_string: Optional[str] = None
+        self._cleanup_custom_filter: str | None = str(custom_filter) if custom_filter else None
+        self._cleanup_filter_string: str | None = None
 
         # Event start (wall-clock) captured during analysis for overlay timing
-        self._event_start: Optional[datetime] = None
-        self._speech_segments_event: List[Tuple[float, float]] = []
-        self._review_segments: List[Tuple[float, float]] = []
+        self._event_start: datetime | None = None
+        self._speech_segments_event: list[tuple[float, float]] = []
+        self._review_segments: list[tuple[float, float]] = []
         self._has_speech_data: bool = False
         # Audio stitching improvements
         self._audio_crossfade_s: float = float(self.composition_config.get('audio_crossfade_seconds', 0.06))
@@ -291,11 +291,11 @@ class MultiCameraComposer:
 
     def compose_multi_camera_event(
         self,
-        video_clips: List[Dict[str, Any]],
+        video_clips: list[dict[str, Any]],
         output_path: str,
-        speech_segments: Optional[List[Dict[str, Any]]] = None,
-        speech_timeline: Optional[List[Dict[str, Any]]] = None,
-        progress_callback: Optional[Callable] = None,
+        speech_segments: list[dict[str, Any]] | None = None,
+        speech_timeline: list[dict[str, Any]] | None = None,
+        progress_callback: Callable | None = None,
     ) -> bool:
         """
         Create a composite video from multiple camera angles of the same event.
@@ -312,7 +312,7 @@ class MultiCameraComposer:
         """
         # If only one clip or composition disabled, use simple merge
         if len(video_clips) == 1 or not self.enable_composition:
-            logging.info(f"Single camera or composition disabled, using simple copy")
+            logging.info("Single camera or composition disabled, using simple copy")
             result = self._simple_copy(video_clips, output_path)
             if progress_callback:
                 progress_callback(len(video_clips), len(video_clips))  # Report completion
@@ -359,7 +359,7 @@ class MultiCameraComposer:
                         logging.info("Using modular AlignmentEngine for audio alignment")
 
                         # Prepare camera_clips dict for modular engine
-                        camera_clips_dict: Dict[str, List[Path]] = {}
+                        camera_clips_dict: dict[str, list[Path]] = {}
                         for cc in camera_clips:
                             if cc.camera not in camera_clips_dict:
                                 camera_clips_dict[cc.camera] = []
@@ -436,7 +436,7 @@ class MultiCameraComposer:
                 progress_callback(total_steps, total_steps)  # Report completion even on fallback
             return result
 
-    def _analyze_clips(self, video_clips: List[Dict[str, Any]]) -> List[CameraClip]:
+    def _analyze_clips(self, video_clips: list[dict[str, Any]]) -> list[CameraClip]:
         """
         Analyze each clip for audio and video quality.
 
@@ -446,7 +446,7 @@ class MultiCameraComposer:
         Returns:
             List of CameraClip objects with quality scores
         """
-        camera_clips: List[CameraClip] = []
+        camera_clips: list[CameraClip] = []
 
         # Find the earliest timestamp to establish event start time
         event_start = min(clip['datetime'] for clip in video_clips)
@@ -488,7 +488,7 @@ class MultiCameraComposer:
 
         return sorted(camera_clips, key=lambda x: x.start_time)
 
-    def _estimate_alignment_offsets(self, camera_clips: List[CameraClip]) -> Dict[str, float]:
+    def _estimate_alignment_offsets(self, camera_clips: list[CameraClip]) -> dict[str, float]:
         """
         Estimate per-camera fine alignment offsets using cross-correlation on audio.
 
@@ -503,7 +503,7 @@ class MultiCameraComposer:
         ref_cam = ref_clip.camera
 
         # Build per-camera representative clip overlapping with reference
-        offsets: Dict[str, float] = {ref_cam: 0.0}
+        offsets: dict[str, float] = {ref_cam: 0.0}
 
         for cam in sorted({c.camera for c in camera_clips}):
             if cam == ref_cam:
@@ -628,7 +628,7 @@ class MultiCameraComposer:
         except Exception:
             return np.array([], dtype=np.float32)
 
-    def _build_audio_cleanup_filter(self) -> Optional[str]:
+    def _build_audio_cleanup_filter(self) -> str | None:
         """Return the ffmpeg filterchain used to clean extracted audio segments."""
         if not getattr(self, '_cleanup_enabled', False):
             return None
@@ -639,7 +639,7 @@ class MultiCameraComposer:
             self._cleanup_filter_string = self._cleanup_custom_filter
             return self._cleanup_filter_string
 
-        filters: List[str] = []
+        filters: list[str] = []
         if self._cleanup_highpass is not None:
             filters.append(f"highpass=f={self._cleanup_highpass:g}")
         if self._cleanup_lowpass is not None:
@@ -648,11 +648,7 @@ class MultiCameraComposer:
             filters.append(f"afftdn=nf={self._cleanup_denoise_nf:g}")
         if self._cleanup_loudnorm:
             filters.append(
-                "loudnorm=I={i:g}:TP={tp:g}:LRA={lra:g}:dual_mono=true".format(
-                    i=self._cleanup_loudnorm_i,
-                    tp=self._cleanup_loudnorm_tp,
-                    lra=self._cleanup_loudnorm_lra,
-                )
+                f"loudnorm=I={self._cleanup_loudnorm_i:g}:TP={self._cleanup_loudnorm_tp:g}:LRA={self._cleanup_loudnorm_lra:g}:dual_mono=true"
             )
         if self._cleanup_extra_filters:
             filters.extend(self._cleanup_extra_filters)
@@ -670,7 +666,7 @@ class MultiCameraComposer:
             )
             self._people_detector = PeopleDetector(cfg)
 
-    def _extract_frame_image(self, video_path: str, t_seconds: float) -> Optional[Image.Image]:
+    def _extract_frame_image(self, video_path: str, t_seconds: float) -> Image.Image | None:
         """Extract a single video frame as PIL Image using ffmpeg at given timestamp."""
         if t_seconds < 0:
             return None
@@ -714,9 +710,9 @@ class MultiCameraComposer:
 
     def _load_speech_segments(
         self,
-        speech_segments: Optional[List[Dict[str, Any]]],
-        speech_timeline: Optional[List[Dict[str, Any]]],
-        camera_clips: List[CameraClip],
+        speech_segments: list[dict[str, Any]] | None,
+        speech_timeline: list[dict[str, Any]] | None,
+        camera_clips: list[CameraClip],
     ) -> None:
         """Transform transcription segments into event-relative intervals."""
         self._speech_segments_event = []
@@ -725,7 +721,7 @@ class MultiCameraComposer:
         if not speech_segments or not speech_timeline or not camera_clips:
             return
 
-        timeline_entries: List[Dict[str, float]] = []
+        timeline_entries: list[dict[str, float]] = []
         for entry in speech_timeline:
             path = entry.get('path')
             if not path:
@@ -743,7 +739,7 @@ class MultiCameraComposer:
         timeline_entries.sort(key=lambda item: item['offset'])
         clip_map = {clip.path: clip for clip in camera_clips}
 
-        intervals: List[Tuple[float, float]] = []
+        intervals: list[tuple[float, float]] = []
 
         for segment in speech_segments:
             try:
@@ -796,11 +792,11 @@ class MultiCameraComposer:
         self._has_speech_data = True
 
     @staticmethod
-    def _merge_intervals(intervals: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
+    def _merge_intervals(intervals: list[tuple[float, float]]) -> list[tuple[float, float]]:
         if not intervals:
             return []
         sorted_intervals = sorted(intervals, key=lambda x: x[0])
-        merged: List[Tuple[float, float]] = [sorted_intervals[0]]
+        merged: list[tuple[float, float]] = [sorted_intervals[0]]
         for start, end in sorted_intervals[1:]:
             last_start, last_end = merged[-1]
             if start <= last_end + 1e-3:
@@ -820,7 +816,7 @@ class MultiCameraComposer:
         return False
 
     @staticmethod
-    def _extract_review_segments(segments: List[CompositionSegment]) -> List[Tuple[float, float]]:
+    def _extract_review_segments(segments: list[CompositionSegment]) -> list[tuple[float, float]]:
         review_intervals = [
             (seg.start_time, seg.start_time + seg.duration)
             for seg in segments
@@ -924,12 +920,12 @@ class MultiCameraComposer:
                 )
                 return 0.5
 
-            rms_levels: List[float] = []
-            rms_min_levels: List[float] = []
-            peak_levels: List[float] = []
-            peak_counts: List[float] = []
+            rms_levels: list[float] = []
+            rms_min_levels: list[float] = []
+            peak_levels: list[float] = []
+            peak_counts: list[float] = []
 
-            def _extract_trailing_number(value: str) -> Optional[float]:
+            def _extract_trailing_number(value: str) -> float | None:
                 matches = re.findall(r"-?\d+(?:\.\d+)?", value)
                 if not matches:
                     return None
@@ -1017,7 +1013,7 @@ class MultiCameraComposer:
             logging.warning(f"Could not analyze audio quality for {video_path}: {e}")
             return 0.5
 
-    def _select_audio_source(self, camera_clips: List[CameraClip]) -> CameraClip:
+    def _select_audio_source(self, camera_clips: list[CameraClip]) -> CameraClip:
         """
         Select the best audio source from available clips.
 
@@ -1044,8 +1040,8 @@ class MultiCameraComposer:
 
     def _generate_composition_timeline(
         self,
-        camera_clips: List[CameraClip]
-    ) -> List[CompositionSegment]:
+        camera_clips: list[CameraClip]
+    ) -> list[CompositionSegment]:
         """
         Generate a timeline of which camera to use at each point in time.
 
@@ -1064,8 +1060,8 @@ class MultiCameraComposer:
 
     def _generate_aligned_timelines(
         self,
-        camera_clips: List[CameraClip]
-    ) -> Tuple[List[CompositionSegment], List[CompositionSegment]]:
+        camera_clips: list[CameraClip]
+    ) -> tuple[list[CompositionSegment], list[CompositionSegment]]:
         """
         Build overlap-aligned timelines for video and audio across the full event.
 
@@ -1079,7 +1075,7 @@ class MultiCameraComposer:
             return [], []
 
         # Build boundaries: sorted unique times (seconds from event start)
-        boundaries: List[float] = sorted({
+        boundaries: list[float] = sorted({
             0.0,
             *[c.start_time for c in camera_clips],
             *[c.start_time + c.duration for c in camera_clips],
@@ -1089,8 +1085,8 @@ class MultiCameraComposer:
         rr_index = 0
         cameras_sorted = sorted(set(c.camera for c in camera_clips))
 
-        video_segments: List[CompositionSegment] = []
-        audio_segments: List[CompositionSegment] = []
+        video_segments: list[CompositionSegment] = []
+        audio_segments: list[CompositionSegment] = []
 
         speech_people_strategy = self.switching_strategy == 'speech_people'
 
@@ -1107,7 +1103,7 @@ class MultiCameraComposer:
                 continue
 
             speech_active = True
-            available_people: List[CameraClip] = []
+            available_people: list[CameraClip] = []
             people_cameras: set = set()
             multiple_people_angles = False
             if speech_people_strategy:
@@ -1115,7 +1111,7 @@ class MultiCameraComposer:
                 if not speech_active and len(avail) > 1:
                     # Evaluate people presence at segment midpoint for each available clip
                     sample_t = seg_start + 0.5 * seg_dur
-                    counts: Dict[str, int] = {}
+                    counts: dict[str, int] = {}
                     for c in avail:
                         counts[c.path] = self._get_people_count_for_clip_at(c, sample_t)
                     available_people = [c for c in avail if counts.get(c.path, 0) >= self._people_min_count]
@@ -1123,7 +1119,7 @@ class MultiCameraComposer:
                     multiple_people_angles = len(people_cameras) >= 2
 
             # VIDEO selection per strategy (speech-aware)
-            selected_v: Optional[CameraClip] = None
+            selected_v: CameraClip | None = None
             if speech_people_strategy and (not speech_active) and available_people:
                 # Choose the angle with most people
                 # Recompute count lazily to avoid stale values
@@ -1165,7 +1161,7 @@ class MultiCameraComposer:
             ))
 
             # AUDIO selection
-            selected_a: Optional[CameraClip] = None
+            selected_a: CameraClip | None = None
             if self.audio_source in ('best_quality', 'per_segment'):
                 selected_a = max(avail, key=lambda x: x.audio_quality_score)
             elif self.audio_source == 'longest':
@@ -1193,7 +1189,7 @@ class MultiCameraComposer:
 
         return video_segments, audio_segments
 
-    def _timeline_time_based(self, camera_clips: List[CameraClip]) -> List[CompositionSegment]:
+    def _timeline_time_based(self, camera_clips: list[CameraClip]) -> list[CompositionSegment]:
         """
         Create timeline by switching cameras at regular intervals.
 
@@ -1272,7 +1268,7 @@ class MultiCameraComposer:
 
         return timeline
 
-    def _timeline_round_robin(self, camera_clips: List[CameraClip]) -> List[CompositionSegment]:
+    def _timeline_round_robin(self, camera_clips: list[CameraClip]) -> list[CompositionSegment]:
         """
         Create timeline by cycling through available cameras equally.
 
@@ -1280,7 +1276,7 @@ class MultiCameraComposer:
         """
         return self._timeline_time_based(camera_clips)  # For now, reuse time_based
 
-    def _timeline_by_audio_quality(self, camera_clips: List[CameraClip]) -> List[CompositionSegment]:
+    def _timeline_by_audio_quality(self, camera_clips: list[CameraClip]) -> list[CompositionSegment]:
         """
         Create timeline by preferring cameras with better audio at each moment.
         """
@@ -1336,8 +1332,8 @@ class MultiCameraComposer:
 
     def _create_composite_video(
         self,
-        video_timeline: List[CompositionSegment],
-        audio_timeline: List[CompositionSegment],
+        video_timeline: list[CompositionSegment],
+        audio_timeline: list[CompositionSegment],
         output_path: str
     ) -> bool:
         """
@@ -1536,7 +1532,7 @@ class MultiCameraComposer:
                         cmd.extend(['-i', seg])
                     # Build filter graph
                     cf = max(0.01, min(5.0, self._audio_crossfade_s))
-                    filters: List[str] = []
+                    filters: list[str] = []
                     last_label = None
                     n = len(audio_seg_files)
                     if n == 2:
@@ -1593,7 +1589,7 @@ class MultiCameraComposer:
             return False
 
     # --- Performance-optimized single-pass composition ---
-    def _probe_video_dimensions(self, path: str) -> Tuple[int, int]:
+    def _probe_video_dimensions(self, path: str) -> tuple[int, int]:
         """Return (width, height) for the first video stream via ffprobe; fallback to 1920x1080."""
         try:
             res = subprocess.run(
@@ -1637,7 +1633,7 @@ class MultiCameraComposer:
         # Escape backslashes and single quotes
         return path.replace('\\', r'\\').replace("'", r"\'")
 
-    def _video_codec_args(self) -> List[str]:
+    def _video_codec_args(self) -> list[str]:
         """Return ffmpeg args for chosen video encoder."""
         if self._use_hw_encode:
             # Hardware encoder (macOS videotoolbox). Use bitrate-based control.
@@ -1656,8 +1652,8 @@ class MultiCameraComposer:
 
     def _create_composite_video_single_pass(
         self,
-        video_timeline: List[CompositionSegment],
-        audio_timeline: List[CompositionSegment],
+        video_timeline: list[CompositionSegment],
+        audio_timeline: list[CompositionSegment],
         output_path: str,
         tmpdir: str,
     ) -> bool:
@@ -1666,8 +1662,8 @@ class MultiCameraComposer:
             return False
 
         # Determine unique inputs and index mapping
-        unique_paths: List[str] = []
-        index_by_path: Dict[str, int] = {}
+        unique_paths: list[str] = []
+        index_by_path: dict[str, int] = {}
         def _add(p: str):
             if p not in index_by_path:
                 index_by_path[p] = len(unique_paths)
@@ -1695,10 +1691,10 @@ class MultiCameraComposer:
             )
 
         # Build filter graph
-        filters: List[str] = []
+        filters: list[str] = []
 
         # Video trims
-        v_labels: List[str] = []
+        v_labels: list[str] = []
         for idx, seg in enumerate(video_timeline):
             ip = index_by_path[seg.clip_path]
             start = max(0.0, seg.source_start)
@@ -1712,7 +1708,7 @@ class MultiCameraComposer:
             )
 
         # Video concat
-        v_inputs = ''.join(f'[{l}]' for l in v_labels)
+        v_inputs = ''.join(f'[{label}]' for label in v_labels)
         filters.append(f"{v_inputs}concat=n={len(v_labels)}:v=1:a=0[vcat]")
         if ass_path:
             ass_escaped = self._escape_subtitles_path(ass_path)
@@ -1722,9 +1718,9 @@ class MultiCameraComposer:
             vout = 'vcat'
 
         # Audio trims
-        a_labels: List[str] = []
+        a_labels: list[str] = []
         # Cache which input has audio
-        has_audio_map: Dict[str, bool] = {p: self._probe_has_audio(p) for p in unique_paths}
+        has_audio_map: dict[str, bool] = {p: self._probe_has_audio(p) for p in unique_paths}
         for idx, seg in enumerate(audio_timeline):
             ip = index_by_path[seg.clip_path]
             start = max(0.0, seg.source_start)
@@ -1740,10 +1736,10 @@ class MultiCameraComposer:
         # Audio stitch: acrossfade ladder or concat
         if not a_labels:
             # If no audio timeline, create silent audio to keep mux stable
-            filters.append(f"anullsrc=r=48000:cl=stereo[asilent]")
+            filters.append("anullsrc=r=48000:cl=stereo[asilent]")
             aout = 'asilent'
         elif len(a_labels) == 1 or self._audio_crossfade_s <= 0.0:
-            a_inputs = ''.join(f'[{l}]' for l in a_labels)
+            a_inputs = ''.join(f'[{label}]' for label in a_labels)
             filters.append(f"{a_inputs}concat=n={len(a_labels)}:v=0:a=1[acat]")
             aout = 'acat'
         else:
@@ -1768,7 +1764,7 @@ class MultiCameraComposer:
             aout = 'aout'
 
         # Assemble command
-        cmd: List[str] = ['ffmpeg', '-y', '-loglevel', 'error']
+        cmd: list[str] = ['ffmpeg', '-y', '-loglevel', 'error']
         for p in unique_paths:
             cmd.extend(['-i', p])
         cmd.extend([
@@ -1787,7 +1783,7 @@ class MultiCameraComposer:
             return False
         return True
 
-    def _simple_copy(self, video_clips: List[Dict[str, Any]], output_path: str) -> bool:
+    def _simple_copy(self, video_clips: list[dict[str, Any]], output_path: str) -> bool:
         """
         Simple copy of a single video file.
         """
@@ -1809,7 +1805,7 @@ class MultiCameraComposer:
         result = subprocess.run(command)
         return result.returncode == 0
 
-    def _sequential_merge(self, video_clips: List[Dict[str, Any]], output_path: str) -> bool:
+    def _sequential_merge(self, video_clips: list[dict[str, Any]], output_path: str) -> bool:
         """
         Sequential merge of clips from the same camera (fallback behavior).
         """
@@ -1821,11 +1817,11 @@ class MultiCameraComposer:
         return merge_video_clips(video_paths, output_path, crossfade)
 
     @staticmethod
-    def _coalesce_segments(segments: List[CompositionSegment]) -> List[CompositionSegment]:
+    def _coalesce_segments(segments: list[CompositionSegment]) -> list[CompositionSegment]:
         """Merge adjacent segments that use the same source to reduce cuts."""
         if not segments:
             return []
-        merged: List[CompositionSegment] = []
+        merged: list[CompositionSegment] = []
         current = segments[0]
         for seg in segments[1:]:
             # If contiguous and from same source clip, extend
@@ -1846,11 +1842,11 @@ class MultiCameraComposer:
         self,
         tmpdir: str,
         total_duration: float,
-        event_start: Optional[datetime],
+        event_start: datetime | None,
         dst_offset_hours: int = 1,
         include_timestamp: bool = True,
-        review_segments: Optional[List[Tuple[float, float]]] = None,
-    ) -> Optional[str]:
+        review_segments: list[tuple[float, float]] | None = None,
+    ) -> str | None:
         """Generate an ASS subtitle file for timestamps and review indicators."""
         has_timestamp = include_timestamp and event_start is not None
         review_segments = review_segments or []
@@ -1860,7 +1856,7 @@ class MultiCameraComposer:
             return None
 
         try:
-            ass_lines: List[str] = []
+            ass_lines: list[str] = []
             ass_lines.append("[Script Info]")
             ass_lines.append("ScriptType: v4.00+")
             ass_lines.append("PlayResX: 1920")
@@ -1910,10 +1906,7 @@ class MultiCameraComposer:
                     start_ts = fmt_ass_time(clamped_start)
                     end_ts = fmt_ass_time(clamped_end)
                     ass_lines.append(
-                        "Dialogue: 1,{start},{end},ReviewIndicator,,0000,0000,0000,,REVIEW ALT ANGLES".format(
-                            start=start_ts,
-                            end=end_ts,
-                        )
+                        f"Dialogue: 1,{start_ts},{end_ts},ReviewIndicator,,0000,0000,0000,,REVIEW ALT ANGLES"
                     )
 
             ass_path = os.path.join(tmpdir, 'overlay.ass')

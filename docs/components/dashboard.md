@@ -1,6 +1,6 @@
 # Pipeline Dashboard
 
-`PipelineDashboard` (`src/pipeline_dashboard.py`) provides a Rich Live view of
+`PipelineDashboard` (`blink_pipeline/pipeline_dashboard.py`) provides a Rich Live view of
 the entire pipeline. It replaces the legacy `ProgressTracker` while preserving
 fully programmatic control over stages and substages.
 

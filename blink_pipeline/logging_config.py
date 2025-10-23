@@ -10,7 +10,6 @@ import logging.handlers
 import os
 import sys
 from datetime import datetime
-from typing import Optional
 from pathlib import Path
 
 
@@ -44,8 +43,7 @@ class PipelineLogger:
         # Configure root logger
         self._configure_root_logger()
 
-        # Get logger instance
-        self.logger = logging.getLogger("pipeline")
+    # No stored logger instance; use logging.getLogger("pipeline") directly
 
     def _configure_root_logger(self):
         """Configure the root logger with multiple handlers."""
@@ -111,69 +109,62 @@ class PipelineLogger:
 
     def log_session_start(self, config: dict):
         """Log session start with configuration details."""
-        logger = logging.getLogger("pipeline")
-        logger.info("=" * 80)
-        logger.info(f"PIPELINE SESSION STARTED: {self.session_id}")
-        logger.info("=" * 80)
-        logger.info(f"Log directory: {self.log_dir.absolute()}")
-        logger.info(f"Log level: {logging.getLevelName(self.log_level)}")
-        logger.info(f"Python version: {sys.version}")
-        logger.info(f"Working directory: {os.getcwd()}")
+        logging.getLogger("pipeline").info("=" * 80)
+        logging.getLogger("pipeline").info(f"PIPELINE SESSION STARTED: {self.session_id}")
+        logging.getLogger("pipeline").info("=" * 80)
+        logging.getLogger("pipeline").info(f"Log directory: {self.log_dir.absolute()}")
+        logging.getLogger("pipeline").info(f"Log level: {logging.getLevelName(self.log_level)}")
+        logging.getLogger("pipeline").info(f"Python version: {sys.version}")
+        logging.getLogger("pipeline").info(f"Working directory: {os.getcwd()}")
 
         # Log key configuration
-        logger.info("Configuration:")
-        logger.info(f"  Input directory: {config['paths']['input_dir']}")
-        logger.info(f"  Output directory: {config['paths']['output_dir']}")
-        logger.info(f"  Max time diff: {config['grouping']['max_time_diff_seconds']}s")
-        logger.info(f"  Transcription workers: {config.get('concurrency', {}).get('transcription_workers', 'auto')}")
-        logger.info(f"  Merge workers: {config.get('concurrency', {}).get('merge_workers', 'auto')}")
+        logging.getLogger("pipeline").info("Configuration:")
+        logging.getLogger("pipeline").info(f"  Input directory: {config['paths']['input_dir']}")
+        logging.getLogger("pipeline").info(f"  Output directory: {config['paths']['output_dir']}")
+        logging.getLogger("pipeline").info(f"  Max time diff: {config['grouping']['max_time_diff_seconds']}s")
+        logging.getLogger("pipeline").info(f"  Transcription workers: {config.get('concurrency', {}).get('transcription_workers', 'auto')}")
+        logging.getLogger("pipeline").info(f"  Merge workers: {config.get('concurrency', {}).get('merge_workers', 'auto')}")
 
     def log_session_end(self, success: bool = True):
         """Log session end."""
-        logger = logging.getLogger("pipeline")
-        logger.info("=" * 80)
+        logging.getLogger("pipeline").info("=" * 80)
         if success:
-            logger.info(f"PIPELINE SESSION COMPLETED SUCCESSFULLY: {self.session_id}")
+            logging.getLogger("pipeline").info(f"PIPELINE SESSION COMPLETED SUCCESSFULLY: {self.session_id}")
         else:
-            logger.error(f"PIPELINE SESSION FAILED: {self.session_id}")
-        logger.info("=" * 80)
+            logging.getLogger("pipeline").error(f"PIPELINE SESSION FAILED: {self.session_id}")
+        logging.getLogger("pipeline").info("=" * 80)
 
     def log_stage_start(self, stage_name: str, stage_number: int, details: str = ""):
         """Log the start of a pipeline stage."""
-        logger = logging.getLogger("pipeline")
-        logger.info("-" * 80)
-        logger.info(f"STAGE {stage_number}: {stage_name} - START")
+        logging.getLogger("pipeline").info("-" * 80)
+        logging.getLogger("pipeline").info(f"STAGE {stage_number}: {stage_name} - START")
         if details:
-            logger.info(f"  {details}")
-        logger.info("-" * 80)
+            logging.getLogger("pipeline").info(f"  {details}")
+        logging.getLogger("pipeline").info("-" * 80)
 
     def log_stage_end(self, stage_name: str, stage_number: int, success: bool = True, details: str = ""):
         """Log the end of a pipeline stage."""
-        logger = logging.getLogger("pipeline")
         status = "COMPLETE" if success else "FAILED"
-        logger.info("-" * 80)
-        logger.info(f"STAGE {stage_number}: {stage_name} - {status}")
+        logging.getLogger("pipeline").info("-" * 80)
+        logging.getLogger("pipeline").info(f"STAGE {stage_number}: {stage_name} - {status}")
         if details:
-            logger.info(f"  {details}")
-        logger.info("-" * 80)
+            logging.getLogger("pipeline").info(f"  {details}")
+        logging.getLogger("pipeline").info("-" * 80)
 
     def log_worker_start(self, worker_type: str, worker_id: str, details: str = ""):
         """Log worker process start."""
-        logger = logging.getLogger(f"pipeline.worker.{worker_type}")
-        logger.debug(f"Worker {worker_id} started - {details}")
+        logging.getLogger(f"pipeline.worker.{worker_type}").debug(f"Worker {worker_id} started - {details}")
 
     def log_worker_end(self, worker_type: str, worker_id: str, success: bool = True, details: str = ""):
         """Log worker process end."""
-        logger = logging.getLogger(f"pipeline.worker.{worker_type}")
         if success:
-            logger.debug(f"Worker {worker_id} completed - {details}")
+            logging.getLogger(f"pipeline.worker.{worker_type}").debug(f"Worker {worker_id} completed - {details}")
         else:
-            logger.error(f"Worker {worker_id} failed - {details}")
+            logging.getLogger(f"pipeline.worker.{worker_type}").error(f"Worker {worker_id} failed - {details}")
 
     def log_exception(self, context: str, exc: Exception):
         """Log an exception with full traceback."""
-        logger = logging.getLogger("pipeline")
-        logger.error(f"Exception in {context}: {type(exc).__name__}: {exc}", exc_info=True)
+        logging.getLogger("pipeline").error(f"Exception in {context}: {type(exc).__name__}: {exc}", exc_info=True)
 
     def get_logger(self, name: str = "pipeline") -> logging.Logger:
         """Get a logger instance."""

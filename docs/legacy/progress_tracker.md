@@ -1,6 +1,6 @@
 # Legacy Progress Tracker
 
-`src/progress.py` contains the original Rich progress tracker used before the
+`blink_pipeline/progress.py` contains the original Rich progress tracker used before the
 full `PipelineDashboard` was introduced. It remains in the codebase for demo
 purposes (`test_progress.py`) and as a lightweight reference for scripts that
 don’t require the full dashboard layout.

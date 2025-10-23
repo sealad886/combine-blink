@@ -26,7 +26,6 @@ Performance:
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -73,7 +72,7 @@ class AlignmentResult:
     """
     camera: str
     offset_seconds: float
-    drift: Optional[float] = None
+    drift: float | None = None
     confidence: float = 1.0
     num_windows: int = 1
     offset_std: float = 0.0
@@ -123,9 +122,9 @@ class AlignmentEngine:
 
     def align_clips(
         self,
-        camera_clips: Dict[str, List[Path]],
+        camera_clips: dict[str, list[Path]],
         ref_camera: str
-    ) -> List[AlignmentResult]:
+    ) -> list[AlignmentResult]:
         """Align all cameras to reference camera.
 
         Args:
@@ -179,7 +178,7 @@ class AlignmentEngine:
         self,
         camera_clip: Path,
         ref_clip: Path
-    ) -> Tuple[float, Optional[float], float, int, float]:
+    ) -> tuple[float, float | None, float, int, float]:
         """Estimate offset and optional drift between two clips.
 
         Args:
@@ -338,8 +337,8 @@ class AlignmentEngine:
         self,
         clip_path: Path,
         start_seconds: float = 0.0,
-        duration_seconds: Optional[float] = None
-    ) -> Optional[np.ndarray]:
+        duration_seconds: float | None = None
+    ) -> np.ndarray | None:
         """Extract audio segment from clip.
 
         Uses audio_cache module for caching WAV files. Applies bandpass
@@ -409,13 +408,13 @@ class CachedAlignmentEngine(AlignmentEngine):
             config: Alignment configuration
         """
         super().__init__(config)
-        self._cache: Dict[Tuple, AlignmentResult] = {}
+        self._cache: dict[tuple, AlignmentResult] = {}
 
     def _estimate_offset(
         self,
         camera_clip: Path,
         ref_clip: Path
-    ) -> Tuple[float, Optional[float], float, int, float]:
+    ) -> tuple[float, float | None, float, int, float]:
         """Estimate offset with caching.
 
         Args:

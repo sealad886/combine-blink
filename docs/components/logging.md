@@ -1,7 +1,7 @@
 # Logging Architecture
 
-Logging is configured by `src/logging_config.py` and activated at the start of
-`src/orchestrator.py`. It is entirely file-based to avoid clashing with Rich’s
+Logging is configured by `blink_pipeline/logging_config.py` and activated at the start of
+`blink_pipeline/orchestrator.py`. It is entirely file-based to avoid clashing with Rich’s
 terminal output.
 
 ## PipelineLogger
@@ -69,3 +69,15 @@ retain their defaults regardless.
 
 When adjusting logging, run this test and confirm new handlers follow the same
 structure to keep downstream tooling stable.
+
+## Design Simplification
+
+We removed redundant module- and instance-level `logger` variables across the codebase.
+Instead of storing `logger = ...` in modules or classes, code now calls `logging.getLogger(...)`
+inline where needed (for example, `logging.getLogger("pipeline").info(...)`).
+
+- This avoids confusion between the standard Python logger and the `PipelineLogger` helper.
+- `PipelineLogger.get_logger(name)` is retained for backward compatibility, but new code should prefer
+  direct `logging.getLogger(name)` calls.
+- Worker tasks and subsystems use namespaced loggers like `pipeline.transcription`, `pipeline.merge`,
+  or the module name (e.g. `blink_pipeline.composition.quality`).

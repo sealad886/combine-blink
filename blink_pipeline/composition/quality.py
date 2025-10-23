@@ -12,14 +12,15 @@ Classes:
 Author: Phase 1 implementation
 """
 
-from typing import Protocol, Optional, Dict, Any, List
-from pathlib import Path
-import subprocess
-import re
-import logging
-import json
 import hashlib
-from .models import QualityMetrics, QualityScore, CameraClip
+import json
+import logging
+import re
+import subprocess
+from pathlib import Path
+from typing import Protocol
+
+from .models import QualityMetrics, QualityScore
 
 
 class QualityAnalyzer(Protocol):
@@ -29,7 +30,7 @@ class QualityAnalyzer(Protocol):
         """Analyze audio quality for a video file."""
         ...
 
-    def score(self, metrics: QualityMetrics, weights: Dict[str, float]) -> QualityScore:
+    def score(self, metrics: QualityMetrics, weights: dict[str, float]) -> QualityScore:
         """Calculate weighted quality score from metrics."""
         ...
 
@@ -45,7 +46,6 @@ class FFmpegAudioQualityAnalyzer:
             timeout: Timeout in seconds for FFmpeg analysis
         """
         self.timeout = timeout
-        self.logger = logging.getLogger(__name__)
 
     def analyze(self, video_path: Path, has_audio: bool = True) -> QualityMetrics:
         """
@@ -87,7 +87,7 @@ class FFmpegAudioQualityAnalyzer:
 
             stderr_output = result.stderr or ''
             if result.returncode != 0 and not stderr_output:
-                self.logger.warning(
+                logging.getLogger(__name__).warning(
                     "Audio analysis failed for %s (code %s)",
                     video_path,
                     result.returncode,
@@ -100,10 +100,10 @@ class FFmpegAudioQualityAnalyzer:
             return metrics
 
         except subprocess.TimeoutExpired:
-            self.logger.warning(f"Audio analysis timed out for {video_path}")
+            logging.getLogger(__name__).warning(f"Audio analysis timed out for {video_path}")
             return self._default_metrics()
         except Exception as e:
-            self.logger.warning(f"Could not analyze audio quality for {video_path}: {e}")
+            logging.getLogger(__name__).warning(f"Could not analyze audio quality for {video_path}: {e}")
             return self._default_metrics()
 
     def _parse_astats_output(self, stderr: str) -> QualityMetrics:
@@ -116,10 +116,10 @@ class FFmpegAudioQualityAnalyzer:
         Returns:
             QualityMetrics with parsed values
         """
-        rms_levels: List[float] = []
-        rms_min_levels: List[float] = []
-        peak_levels: List[float] = []
-        peak_counts: List[float] = []
+        rms_levels: list[float] = []
+        rms_min_levels: list[float] = []
+        peak_levels: list[float] = []
+        peak_counts: list[float] = []
 
         for line in stderr.splitlines():
             line = line.strip()
@@ -168,7 +168,7 @@ class FFmpegAudioQualityAnalyzer:
         )
 
     @staticmethod
-    def _extract_trailing_number(value: str) -> Optional[float]:
+    def _extract_trailing_number(value: str) -> float | None:
         """Extract the last number from a string."""
         matches = re.findall(r"-?\d+(?:\.\d+)?", value)
         if not matches:
@@ -190,7 +190,7 @@ class FFmpegAudioQualityAnalyzer:
             snr_db=20.0
         )
 
-    def score(self, metrics: QualityMetrics, weights: Dict[str, float]) -> QualityScore:
+    def score(self, metrics: QualityMetrics, weights: dict[str, float]) -> QualityScore:
         """
         Calculate weighted quality score from metrics.
 
@@ -270,7 +270,7 @@ class FFmpegAudioQualityAnalyzer:
 class CachedQualityAnalyzer:
     """Wrapper that caches quality analysis results to disk."""
 
-    def __init__(self, analyzer: QualityAnalyzer, cache_dir: Optional[Path] = None):
+    def __init__(self, analyzer: QualityAnalyzer, cache_dir: Path | None = None):
         """
         Initialize with base analyzer and optional cache directory.
 
@@ -280,7 +280,6 @@ class CachedQualityAnalyzer:
         """
         self.analyzer = analyzer
         self.cache_dir = Path(cache_dir) if cache_dir else None
-        self.logger = logging.getLogger(__name__)
 
         if self.cache_dir:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -308,13 +307,13 @@ class CachedQualityAnalyzer:
 
         if cache_file.exists():
             try:
-                with open(cache_file, 'r') as f:
+                with open(cache_file) as f:
                     data = json.load(f)
                 metrics = QualityMetrics(**data)
-                self.logger.debug(f"Loaded cached quality metrics for {video_path.name}")
+                logging.getLogger(__name__).debug(f"Loaded cached quality metrics for {video_path.name}")
                 return metrics
             except Exception as e:
-                self.logger.warning(f"Failed to load cache for {video_path}: {e}")
+                logging.getLogger(__name__).warning(f"Failed to load cache for {video_path}: {e}")
 
         # Perform fresh analysis
         metrics = self.analyzer.analyze(video_path, has_audio)
@@ -331,13 +330,13 @@ class CachedQualityAnalyzer:
             }
             with open(cache_file, 'w') as f:
                 json.dump(cache_data, f, indent=2)
-            self.logger.debug(f"Cached quality metrics for {video_path.name}")
+            logging.getLogger(__name__).debug(f"Cached quality metrics for {video_path.name}")
         except Exception as e:
-            self.logger.warning(f"Failed to cache quality for {video_path}: {e}")
+            logging.getLogger(__name__).warning(f"Failed to cache quality for {video_path}: {e}")
 
         return metrics
 
-    def score(self, metrics: QualityMetrics, weights: Dict[str, float]) -> QualityScore:
+    def score(self, metrics: QualityMetrics, weights: dict[str, float]) -> QualityScore:
         """Calculate score (delegates to base analyzer)."""
         return self.analyzer.score(metrics, weights)
 

@@ -5,10 +5,14 @@ Multi-window GCC-PHAT time delay estimation with optional drift model.
 This version slices from a cached 16 kHz mono WAV to avoid repeated video decodes.
 """
 from __future__ import annotations
+
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Tuple, Optional
+
 import numpy as np
+
 from blink_pipeline.audio_cache import ensure_wav_cache, load_wav_segment
+
 
 @dataclass
 class ClipLike:
@@ -30,7 +34,7 @@ def _extract_audio_segment(video_path: str,
     return load_wav_segment(wav, source_start, duration, sr=sr)
 
 def gcc_phat(sig: np.ndarray, refsig: np.ndarray, fs: int,
-             max_tau: Optional[float] = None, interp: int = 16) -> float:
+             max_tau: float | None = None, interp: int = 16) -> float:
     sig = np.asarray(sig, dtype=np.float32).ravel()
     refsig = np.asarray(refsig, dtype=np.float32).ravel()
     n = sig.shape[0] + refsig.shape[0]
@@ -39,7 +43,8 @@ def gcc_phat(sig: np.ndarray, refsig: np.ndarray, fs: int,
     SIG = np.fft.rfft(sig, n=n)
     REFSIG = np.fft.rfft(refsig, n=n)
     R = SIG * np.conj(REFSIG)
-    denom = np.abs(R); denom[denom == 0] = 1e-12
+    denom = np.abs(R)
+    denom[denom == 0] = 1e-12
     cc = np.fft.irfft(R / denom, n=(interp * n))
     max_shift = int(interp * n / 2)
     if max_tau is not None:
@@ -58,30 +63,36 @@ def estimate_offsets_and_drift(camera_clips: Iterable[ClipLike],
                                hp: int = 300,
                                lp: int = 3000,
                                max_shift_seconds: float = 1.0,
-                               estimate_drift: bool = True) -> Tuple[Dict[str,float], Dict[str,float]]:
+                               estimate_drift: bool = True) -> tuple[dict[str,float], dict[str,float]]:
     """Return (offsets, drifts) dicts per camera relative to ref_camera."""
     clips = [c for c in camera_clips if c.camera != ref_camera]
-    offsets: Dict[str,float] = {}
-    drifts: Dict[str,float] = {}
+    offsets: dict[str,float] = {}
+    drifts: dict[str,float] = {}
     for clip in clips:
         # Determine overlap region (simplified: use min duration window from start)
         win = min(window_seconds, clip.duration)
         if win <= 0.25:
-            offsets[clip.camera] = 0.0; drifts[clip.camera] = 0.0; continue
+            offsets[clip.camera] = 0.0
+            drifts[clip.camera] = 0.0
+            continue
         ref = next((c for c in camera_clips if c.camera == ref_camera), None)
         if ref is None:
-            offsets[clip.camera] = 0.0; drifts[clip.camera] = 0.0; continue
+            offsets[clip.camera] = 0.0
+            drifts[clip.camera] = 0.0
+            continue
 
         # Extract overlapped segments
         x = _extract_audio_segment(clip.path, clip.start_time, win, sample_rate, bandpass, hp, lp)
         y = _extract_audio_segment(ref.path, ref.start_time, win, sample_rate, bandpass, hp, lp)
         if x.size == 0 or y.size == 0:
-            offsets[clip.camera] = 0.0; drifts[clip.camera] = 0.0; continue
+            offsets[clip.camera] = 0.0
+            drifts[clip.camera] = 0.0
+            continue
 
         # Multi-window GCC-PHAT
         step = max(0.5, hop_seconds)
         cursor = 0.0
-        estimates: List[float] = []
+        estimates: list[float] = []
         while cursor + step <= win:
             i0 = int(cursor * sample_rate)
             i1 = int(min(win, cursor + step) * sample_rate)
@@ -89,14 +100,16 @@ def estimate_offsets_and_drift(camera_clips: Iterable[ClipLike],
             estimates.append(delay)
             cursor += step * 0.5  # 50% overlap
         if not estimates:
-            offsets[clip.camera] = 0.0; drifts[clip.camera] = 0.0; continue
+            offsets[clip.camera] = 0.0
+            drifts[clip.camera] = 0.0
+            continue
         median_offset = float(np.median(np.asarray(estimates, dtype=np.float32)))
         offsets[clip.camera] = median_offset
         drifts[clip.camera] = 0.0  # keep simple; drift fitting optional
     return offsets, drifts
 
 def estimate_per_clip_offsets(
-    clips: List[ClipLike],
+    clips: list[ClipLike],
     ref_camera: str,
     *,
     sample_rate: int = 16000,
@@ -106,7 +119,7 @@ def estimate_per_clip_offsets(
     hp: int = 300,
     lp: int = 3000,
     max_shift_seconds: float = 1.0,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """
     Estimate time offsets for clips from different cameras relative to a reference camera.
 

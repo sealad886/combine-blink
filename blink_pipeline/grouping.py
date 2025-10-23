@@ -1,9 +1,8 @@
 import logging
-from datetime import timedelta
-from typing import List, Dict, Any
+from typing import Any
 
 
-def group_videos(video_files: List[Dict[str, Any]], max_diff_seconds: int) -> List[List[Dict[str, Any]]]:
+def group_videos(video_files: list[dict[str, Any]], max_diff_seconds: int) -> list[list[dict[str, Any]]]:
     """
     Groups video files into multi-camera events based on overlapping timestamps.
 
@@ -54,7 +53,7 @@ def group_videos(video_files: List[Dict[str, Any]], max_diff_seconds: int) -> Li
     _log_grouping_stats(all_groups)
 
     return all_groups
-def _log_grouping_stats(groups: List[List[Dict[str, Any]]]) -> None:
+def _log_grouping_stats(groups: list[list[dict[str, Any]]]) -> None:
     """Log statistics about the grouping results."""
     if not groups:
         return

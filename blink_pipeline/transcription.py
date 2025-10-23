@@ -2,15 +2,17 @@ import logging
 import os
 import sys
 import tempfile
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any
 
 import torch  # type: ignore
 import whisper  # type: ignore
-
 from pyannote.audio import Pipeline  # type: ignore
-from pyannote.core import Annotation  # type: ignore
-from pyannote.core import Segment  # type: ignore
+from pyannote.core import (
+    Annotation,  # type: ignore
+    Segment,  # type: ignore
+)
 
 from blink_pipeline.media_utils import MediaInfo, extract_audio_segment, probe_media_info
 from blink_pipeline.whisper_cpp_wrapper import WhisperCppWrapper, is_ggml_model
@@ -23,21 +25,21 @@ class WhisperSettings:
     compute_type: str
     temperature: float
     beam_size: int
-    language: Optional[str] = None
-    ggml_model_path: Optional[str] = None
-    whisper_cpp_binary: Optional[str] = None
+    language: str | None = None
+    ggml_model_path: str | None = None
+    whisper_cpp_binary: str | None = None
 
 
 @dataclass
 class DiarizationSettings:
     model_id: str
-    auth_token: Optional[str]
+    auth_token: str | None
     min_overlap_ratio: float
 
 
 def process_audio_for_transcription(
-    video_paths: List[str], config: Dict[str, Any], progress_callback=None
-) -> Optional[Dict[str, Any]]:
+    video_paths: list[str], config: dict[str, Any], progress_callback=None
+) -> dict[str, Any] | None:
     """Transcribe and diarise a list of clips while keeping resource usage bounded.
 
     Args:
@@ -82,8 +84,8 @@ def process_audio_for_transcription(
 
     logging.info("Processing %d clips sequentially for transcription", len(video_paths))
 
-    timeline: List[Dict[str, Any]] = []
-    full_segments: List[Dict[str, Any]] = []
+    timeline: list[dict[str, Any]] = []
+    full_segments: list[dict[str, Any]] = []
     running_offset = 0.0
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -95,7 +97,7 @@ def process_audio_for_transcription(
             media_info: MediaInfo = probe_media_info(path)
 
             if not media_info.has_audio or media_info.duration <= 0.0:
-                logging.warning(f"    ⚠ Clip has no usable audio track, skipping")
+                logging.warning("    ⚠ Clip has no usable audio track, skipping")
                 clip_entry = {
                     "path": path,
                     "offset": running_offset,
@@ -117,19 +119,19 @@ def process_audio_for_transcription(
 
             scratch_audio_path = os.path.join(tmpdir, f"clip_{index}.wav")
             if not extract_audio_segment(path, scratch_audio_path):
-                logging.error(f"    ✗ Failed to extract audio")
+                logging.error("    ✗ Failed to extract audio")
                 running_offset += media_info.duration
                 continue
 
             logging.info(f"    → Transcribing audio ({media_info.duration:.1f}s)...")
             transcript_segments = transcriber.transcribe_file(scratch_audio_path)
             if not transcript_segments:
-                logging.warning(f"    ⚠ No speech detected in audio")
+                logging.warning("    ⚠ No speech detected in audio")
                 running_offset += media_info.duration
                 continue
             logging.info(f"    ✓ Found {len(transcript_segments)} speech segment(s)")
 
-            logging.info(f"    → Running speaker diarization...")
+            logging.info("    → Running speaker diarization...")
             diarization_annotation = diarizer.diarize_file(scratch_audio_path)
             labelled_segments = _assign_speakers(
                 transcript_segments,
@@ -161,7 +163,7 @@ def process_audio_for_transcription(
     return {"segments": full_segments, "timeline": timeline}
 
 
-def _parse_whisper_settings(config: Dict[str, Any]) -> WhisperSettings:
+def _parse_whisper_settings(config: dict[str, Any]) -> WhisperSettings:
     model_name = config.get("model_name", "small")
     device_setting = config.get("device", "auto")
     compute_type = config.get("compute_type", "float16")
@@ -205,7 +207,7 @@ def _parse_whisper_settings(config: Dict[str, Any]) -> WhisperSettings:
     )
 
 
-def _parse_diarization_settings(config: Dict[str, Any]) -> DiarizationSettings:
+def _parse_diarization_settings(config: dict[str, Any]) -> DiarizationSettings:
     model_id = config.get("model_id", "pyannote/speaker-diarization-3.1")
     token = config.get("auth_token")
     token_env = config.get("auth_token_env", ["HUGGINGFACE_TOKEN", "HF_TOKEN"])
@@ -243,7 +245,7 @@ class _WhisperCppAdapter:
         self.cpp_wrapper = cpp_wrapper
         self.settings = settings
 
-    def transcribe_file(self, audio_path: str) -> List[Dict[str, Any]]:
+    def transcribe_file(self, audio_path: str) -> list[dict[str, Any]]:
         """Transcribe audio file using whisper.cpp and return segments."""
         result = self.cpp_wrapper.transcribe(
             audio_path,
@@ -317,7 +319,7 @@ class _WhisperTranscriber:
             logging.info("Loading Whisper model '%s' on %s", settings.model_name, settings.device)
             self.model = whisper.load_model(settings.model_name, device=settings.device)
 
-    def transcribe_file(self, audio_path: str) -> List[Dict[str, Any]]:
+    def transcribe_file(self, audio_path: str) -> list[dict[str, Any]]:
         if self.use_whisper_cpp:
             # Use whisper.cpp wrapper
             result = self.model.transcribe(
@@ -407,14 +409,14 @@ class _PyannoteDiarizer:
 
 
 def _assign_speakers(
-    transcript_segments: Iterable[Dict[str, Any]],
+    transcript_segments: Iterable[dict[str, Any]],
     diarization_annotation: Any,
     min_overlap_ratio: float,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Annotate transcript segments with speaker labels from diarization output."""
 
     diarization_tracks = list(diarization_annotation.itertracks(yield_label=True))
-    labelled_segments: List[Dict[str, Any]] = []
+    labelled_segments: list[dict[str, Any]] = []
 
     for segment in transcript_segments:
         start = float(segment.get("start", 0.0))
@@ -436,7 +438,7 @@ def _select_speaker(tracks, start: float, end: float, min_overlap_ratio: float) 
         )
 
     candidate_segment = Segment(start, end)
-    overlap_by_speaker: Dict[str, float] = {}
+    overlap_by_speaker: dict[str, float] = {}
 
     for diarization_segment, _, speaker_label in tracks:
         intersection = diarization_segment & candidate_segment

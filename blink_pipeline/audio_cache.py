@@ -3,10 +3,11 @@ import logging
 import os
 import subprocess
 from pathlib import Path
-from typing import Optional
+
 import numpy as np
 
-def _cache_wav_path(video_path: str, sr: int, base_dir: Optional[str]) -> Path:
+
+def _cache_wav_path(video_path: str, sr: int, base_dir: str | None) -> Path:
     h8 = hashlib.md5(os.path.abspath(video_path).encode("utf-8")).hexdigest()[:8]
     out_dir = Path(base_dir or os.path.join("output","audio_cache"))
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -15,7 +16,7 @@ def _cache_wav_path(video_path: str, sr: int, base_dir: Optional[str]) -> Path:
 
 def ensure_wav_cache(video_path: str, sr: int = 16000,
                      bandpass: bool = False, hp: int = 0, lp: int = 0,
-                     base_dir: Optional[str] = None) -> Optional[str]:
+                     base_dir: str | None = None) -> str | None:
     wav = _cache_wav_path(video_path, sr, base_dir)
     if wav.exists():
         return str(wav)
@@ -23,8 +24,10 @@ def ensure_wav_cache(video_path: str, sr: int = 16000,
            "-i", video_path, "-vn", "-ac","1","-ar",str(sr)]
     af = []
     if bandpass:
-        if hp and hp>0: af += [f"highpass=f={hp}"]
-        if lp and lp>0: af += [f"lowpass=f={lp}"]
+        if hp and hp > 0:
+            af += [f"highpass=f={hp}"]
+        if lp and lp > 0:
+            af += [f"lowpass=f={lp}"]
     if af:
         cmd += ["-af", ",".join(af)]
     cmd += ["-f","wav", str(wav)]
