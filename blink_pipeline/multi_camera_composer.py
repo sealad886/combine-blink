@@ -29,6 +29,13 @@ from blink_pipeline.media_utils import probe_media_info
 from blink_pipeline.av_alignment import estimate_offsets_and_drift, estimate_per_clip_offsets
 from blink_pipeline.people_detection import PeopleDetector, PeopleDetectorConfig
 
+# Modular composition imports (Phase 2)
+from blink_pipeline.composition.alignment import (
+    AlignmentConfig,
+    AlignmentEngine,
+    CachedAlignmentEngine
+)
+
 
 @dataclass
 class CameraClip:
@@ -96,10 +103,11 @@ class MultiCameraComposer:
                 cache_dir=quality_cache_dir
             )
             
-            logging.info("✅ Modular composition enabled - using blink_pipeline.composition.quality")
+            logging.info("✅ Modular composition enabled - using blink_pipeline.composition modules")
         else:
             self._modular_quality_analyzer = None
-            logging.debug("Using legacy quality analysis implementation")
+            self._modular_alignment_engine = None
+            logging.debug("Using legacy composition implementation")
 
         # Default composition settings
         self.switching_strategy = self.composition_config.get('switching_strategy', 'time_based')
@@ -153,6 +161,24 @@ class MultiCameraComposer:
         # Storage for per-camera alignment metadata
         self._alignment_offsets: Dict[str, float] = {}
         self._alignment_drifts: Dict[str, float] = {}
+        
+        # Initialize modular alignment engine if feature flag is enabled
+        if self._use_modular_composition and self._alignment_enabled:
+            alignment_cfg = AlignmentConfig(
+                enabled=self._alignment_enabled,
+                max_shift=self._alignment_max_shift,
+                window_seconds=self._alignment_window,
+                sample_rate=self._alignment_sr,
+                bandpass_enabled=self._alignment_bandpass,
+                bandpass_lowcut=float(self._alignment_hp),
+                bandpass_highcut=float(self._alignment_lp),
+                interpolation_factor=16,  # Default interpolation
+                estimate_drift=self._alignment_estimate_drift
+            )
+            self._modular_alignment_engine = CachedAlignmentEngine(alignment_cfg)
+            logging.info("✅ Modular alignment engine initialized with caching")
+        else:
+            self._modular_alignment_engine = None
 
         people_defaults = {
             'enabled': True,
@@ -326,22 +352,59 @@ class MultiCameraComposer:
             if self._alignment_enabled:
                 try:
                     ref_clip = max(camera_clips, key=lambda x: x.audio_quality_score)
-                    clip_offsets = estimate_per_clip_offsets(
-                        camera_clips,
-                        ref_clip.camera,
-                        sample_rate=self._alignment_sr,
-                        window_seconds=self._alignment_window,
-                        hop_seconds=self._alignment_hop,
-                        max_shift_seconds=self._alignment_max_shift,
-                        bandpass=self._alignment_bandpass,
-                        hp=self._alignment_hp,
-                        lp=self._alignment_lp,
-                    )
-                    # Store and apply per-clip base offsets
+                    
+                    # FEATURE FLAG: Use modular alignment engine or legacy implementation
+                    if self._use_modular_composition and self._modular_alignment_engine:
+                        logging.info("Using modular AlignmentEngine for audio alignment")
+                        
+                        # Prepare camera_clips dict for modular engine
+                        camera_clips_dict: Dict[str, List[Path]] = {}
+                        for cc in camera_clips:
+                            if cc.camera not in camera_clips_dict:
+                                camera_clips_dict[cc.camera] = []
+                            camera_clips_dict[cc.camera].append(Path(cc.path))
+                        
+                        # Run alignment with modular engine
+                        alignment_results = self._modular_alignment_engine.align_clips(
+                            camera_clips=camera_clips_dict,
+                            ref_camera=ref_clip.camera
+                        )
+                        
+                        # Convert results to legacy format for compatibility
+                        clip_offsets = {
+                            result.camera: result.offset_seconds
+                            for result in alignment_results
+                        }
+                        
+                        # Log alignment results
+                        for result in alignment_results:
+                            logging.info(
+                                f"Alignment: {result.camera} offset={result.offset_seconds:.4f}s "
+                                f"confidence={result.confidence:.3f} windows={result.num_windows} "
+                                f"std={result.offset_std:.4f}s"
+                            )
+                    else:
+                        logging.debug("Using legacy alignment implementation")
+                        clip_offsets = estimate_per_clip_offsets(
+                            camera_clips,
+                            ref_clip.camera,
+                            sample_rate=self._alignment_sr,
+                            window_seconds=self._alignment_window,
+                            hop_seconds=self._alignment_hop,
+                            max_shift_seconds=self._alignment_max_shift,
+                            bandpass=self._alignment_bandpass,
+                            hp=self._alignment_hp,
+                            lp=self._alignment_lp,
+                        )
+                    
+                    # Store and apply per-clip base offsets (common for both implementations)
                     self._alignment_offsets_clip = dict(clip_offsets or {})
                     if self._alignment_offsets_clip:
                         for cc in camera_clips:
                             base = self._alignment_offsets_clip.get(cc.path, 0.0)
+                            if base == 0.0:
+                                # Try camera name if path not found
+                                base = self._alignment_offsets_clip.get(cc.camera, 0.0)
                             if abs(base) > 1e-6:
                                 cc.start_time = max(0.0, cc.start_time + base)
                         logging.info("Applied per-clip alignment offsets for %d clips", len(self._alignment_offsets_clip))
