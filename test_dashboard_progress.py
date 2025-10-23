@@ -4,7 +4,7 @@ Quick test to verify dashboard progress callback mechanism.
 """
 import time
 import multiprocessing
-from src.pipeline_dashboard import PipelineDashboard
+from blink_pipeline.pipeline_dashboard import PipelineDashboard
 
 
 def worker_with_progress(progress_dict, task_id):

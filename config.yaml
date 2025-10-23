@@ -35,7 +35,7 @@ multi_camera_composition:
   # Transition style between camera angles
   # Options: 'cut', 'crossfade'
   # Note: 'cut' is instant, 'crossfade' requires re-encoding (slower but smoother)
-  transition_style: crossfade
+  transition_style: cut
 
   # Duration of transitions in seconds (only used if transition_style is 'crossfade')
   transition_duration: 0.28
@@ -55,14 +55,14 @@ multi_camera_composition:
     rms: 0.4          # Overall loudness within a healthy speech range
     peak: 0.2         # Penalize clipping when peaks approach 0 dBFS
     noise: 0.2        # Reward larger gap between average level and noise floor
-    clipping: 0.2     # Penalize repeated peak hits indicative of distortion
+    clipping: 0.3     # Penalize repeated peak hits indicative of distortion
 
   # Clean up the selected audio track before stitching segments
   # MPS optimization: Audio cleanup is ffmpeg-based and runs efficiently on all platforms
   audio_cleanup:
     enabled: true
-    highpass_hz: 100         # Slightly lower for more natural bass (was 120)
-    lowpass_hz: 8000         # Extended to 8kHz for better clarity on speech (was 7000)
+    highpass_hz: 80         # kHz # Slightly lower for more natural bass (was 120)
+    lowpass_hz: 8000         # kHz # Extended to 8kHz for better clarity on speech (was 7000)
     denoise: true            # Apply fft-based denoiser (afftdn)
     denoise_nf: -25.0        # Noise floor reference (dB) for denoiser
     loudness_normalize: true # Per-segment loudness normalization (loudnorm)
@@ -72,20 +72,30 @@ multi_camera_composition:
     extra_filters: []        # Optional list of additional ffmpeg audio filters
 
   # Estimate how many people are visible in each angle to guide silent segments
-  # Uses a Hugging Face object detector (default: hustvl/yolos-tiny) — no OpenCV required.
-  # MPS optimization: YOLOS-tiny is fastest on Apple Silicon; reduce resize_width for speed
+  # Backend options:
+  #   - 'auto': Automatically select best available (Vision on macOS, HuggingFace otherwise)
+  #   - 'vision': Apple Vision framework (fastest, uses Neural Engine, macOS-only)
+  #   - 'huggingface': Hugging Face transformers (YOLOS/DETR with MPS support)
+  #
+  # Vision backend (recommended for macOS):
+  #   - Ultra-fast, native Apple Silicon Neural Engine acceleration
+  #   - No model downloads, minimal GPU memory usage
+  #   - Requires: pyobjc-framework-Vision (pip install pyobjc-framework-Vision pyobjc-framework-Quartz)
+  #
+  # HuggingFace backend:
+  #   - Cross-platform, GPU-accelerated (MPS on Apple Silicon, CUDA on NVIDIA)
+  #   - Requires model download (~40MB for YOLOS-tiny)
+  #   - Configurable models: hustvl/yolos-tiny (fast) or facebook/detr-resnet-50 (accurate)
   people_detection:
     enabled: true
-    sample_frames: 4           # Reduced from 6 for faster detection (still accurate)
-    resize_width: 480          # Reduced from 640 for ~2x faster inference on MPS
+    backend: vision              # 'auto', 'vision', or 'huggingface'
+    sample_frames: 12           # Slightly fewer frames for speed on Apple Silicon
+    resize_width: 480          # Keeps MPS fast while preserving detail (HuggingFace only)
     min_frame_width: 320       # Minimum width to avoid undersized frames
-    # Detector model options (Hugging Face):
-    #   - YOLOS (fast, CPU-friendly, MPS-optimized): hustvl/yolos-tiny
-    #   - DETR (heavier): facebook/detr-resnet-50
-    model_name: hustvl/yolos-tiny
-    # For DETR you can set revision: no_timm to avoid the timm dependency; keep null for YOLOS
-    revision: null
-    score_threshold: 0.65      # Slightly lower threshold for better recall without much speed cost
+    # HuggingFace backend options:
+    model_name: hustvl/yolos-tiny  # YOLOS (fast) or facebook/detr-resnet-50 (accurate)
+    revision: null                 # For DETR: 'no_timm' to avoid timm dependency; null for YOLOS
+    score_threshold: 0.65      # Detection confidence threshold (0.0-1.0)
     min_count: 1               # Minimum people-count to consider angle for silent intervals
 
   # Fine audio alignment (cross-correlation) to reduce per-camera offset
@@ -95,13 +105,13 @@ multi_camera_composition:
   # MPS optimization: Reduced window/hop for faster processing; alignment is CPU-bound (numpy)
   audio_alignment:
     enabled: true
-    max_shift_seconds: 1.0          # Maximum shift to apply (prevents overcorrection)
-    analysis_window_seconds: 10.0   # Reduced from 12s for faster processing (still accurate)
-    hop_seconds: 5.0                # Reduced from 6s for faster multi-window analysis
-    sample_rate: 16000              # Downsample rate for faster cross-correlation
+    max_shift_seconds: 1.5          # Maximum shift to apply (prevents overcorrection)
+    analysis_window_seconds: 12.0   # Reduced from 12s for faster processing (still accurate)
+    hop_seconds: 6.0                # Reduced from 6s for faster multi-window analysis
+    sample_rate: 48000              # Downsample rate for faster cross-correlation
     bandpass: true                  # Apply bandpass filter to focus on speech frequencies
-    highpass_hz: 300                # High-pass filter cutoff (removes low rumble)
-    lowpass_hz: 3000                # Low-pass filter cutoff (removes high noise)
+    highpass_hz: 80                # High-pass filter cutoff (removes low rumble)
+    lowpass_hz: 8000                # Low-pass filter cutoff (removes high noise)
     estimate_drift: true            # Estimate slow drift (seconds per second) and correct in audio
 
   # Burn date/time overlay in bottom-right; Blink files are often off by 1 hour (DST)
@@ -115,14 +125,14 @@ multi_camera_composition:
 
   # Performance and encoding controls
   # single_pass_filter_complex: Compose in one ffmpeg invocation (faster, default true)
-  single_pass_filter_complex: true
+  single_pass_filter_complex: false
   encoding:
     # MPS optimization: Use VideoToolbox hardware encoding on macOS for ~5-10x faster encoding
     # with excellent quality. Falls back to software if hardware encoder unavailable.
-    use_hw_encode: true         # Enable hardware encoding on macOS (libx264)
-    hw_codec: libx264 # VideoToolbox for Apple Silicon/Intel Macs
-    x264_preset: faster         # Software fallback: 'faster' balances speed/quality (upgrade from 'veryfast')
-    x264_crf: '20'              # Software fallback: CRF 20 for higher quality (down from 22)
+    use_hw_encode: true         # Enable hardware encoding on macOS (h264_videotoolbox)
+    hw_codec: h264_videotoolbox # VideoToolbox for Apple Silicon/Intel Macs
+    x264_preset: null         # Software fallback: 'faster' balances speed/quality (upgrade from 'veryfast')
+    x264_crf: null              # Software fallback: CRF 20 for higher quality (down from 22)
     bitrate: 8000k              # VideoToolbox target: 8Mbps for excellent 1080p quality (up from 6Mbps)
 video_processing:
   crossfade_duration: 0.5
@@ -145,6 +155,10 @@ transcription:
   repair_strategy: fill
 
   whisper:
+    # Prefer whisper.cpp on macOS when ggml_model_path is configured (defaults to true on Darwin)
+    # Set to false to force use of openai-whisper even when whisper.cpp is available
+    prefer_whisper_cpp: true
+
     # Force language to avoid auto-detection errors (e.g., 'en' for English, 'es' for Spanish)
     # Set to null or omit for auto-detection
     language: en
@@ -168,7 +182,7 @@ transcription:
     # For non-Core ML (CPU/GPU/Metal):
     #   ggml_model_path: /path/to/whisper.cpp/models/ggml-medium.en.bin  # Standard GGML model
     #   device: auto  # or cpu, cuda, metal
-    ggml_model_path: /Users/andrew/zzCoding-play/whisper.cpp/models/models/coreml-encoder-large-v3-turbo.mlpackage
+    ggml_model_path: /Users/andrew/zzCoding-play/whisper.cpp/models/models/coreml-encoder-large-v3-turbo.mlmodelc
 
     # Path to whisper.cpp binary (auto-detected if in PATH or standard locations)
     # Leave commented out for auto-detection, or specify explicit path:
@@ -180,7 +194,7 @@ transcription:
     #   - 'cpu': CPU-only inference
     #   - 'cuda': NVIDIA GPU acceleration (requires CUDA build)
     #   - 'metal': Metal GPU acceleration (macOS)
-    device: coreml
+    device: auto
 
     beam_size: 5
     temperature: 0.0
@@ -198,6 +212,8 @@ speaker_identification:
   # MPS optimization: Use 'mps' device for Apple Silicon GPU acceleration
   # Options: 'cpu', 'cuda', 'mps' (Apple Silicon), 'GPU' (auto-detect)
   device: mps
+  # Prefer MPS over CUDA on macOS when device is 'auto'
+  prefer_mps_on_mac: true
   similarity_threshold: 0.68
 speakers:
   known_speakers: {}
@@ -206,17 +222,17 @@ concurrency:
 
   # Stage 0: Video validation and repair (I/O-bound, uses ffmpeg)
   # Increased for faster preprocessing on fast SSDs (Apple Silicon Macs have excellent I/O)
-  validation_workers: 3
+  validation_workers: 6
 
   # Stage 3: Transcription and diarization (compute-bound, uses AI models)
   # Keep at 2 to avoid memory pressure; Core ML and MPS models use significant unified memory
   # Each worker loads Whisper + diarization models (~4-6GB per worker)
-  transcription_workers: 2
+  transcription_workers: 3
 
   # Stage 5: Video merging and composition (I/O-bound, uses ffmpeg with VideoToolbox)
   # Increased to 4 for parallel hardware encoding; VideoToolbox offloads to Media Engine
   # Apple Silicon's dedicated video encoders can handle multiple streams efficiently
-  merge_workers: 4
+  merge_workers: 2
 
 # Logging configuration
 logging:

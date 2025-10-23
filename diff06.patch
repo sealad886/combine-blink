@@ -1,8 +1,0 @@
-diff --git a/README.md b/README.md
---- a/README.md
-+++ b/README.md
-@@
-- - `err_detect=ignore_err`: Handles corrupted frames gracefully
-- - `libx264`: Re-encodes video for consistency
-+ - `err_detect=ignore_err`: Handles corrupted frames gracefully
-+ - `h264_videotoolbox`: Hardware-accelerated re-encode for consistency (falls back to `libx264` if unavailable)

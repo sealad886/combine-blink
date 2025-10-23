@@ -26,7 +26,7 @@ def mock_preprocess_partial(video_paths, cache_dir, complete_count):
 
     Simulates what happens during an interrupted run.
     """
-    from src.media_validation import _save_progress
+    from blink_pipeline.media_validation import _save_progress
     from datetime import datetime
 
     # Simulate processing first N videos
@@ -67,7 +67,7 @@ def test_resume_integration():
         print(f"   ✅ Saved progress: {len(completed_first)} videos completed")
 
         # Check progress file exists
-        from src.media_validation import _get_progress_file_path
+        from blink_pipeline.media_validation import _get_progress_file_path
         progress_file = _get_progress_file_path(cache_dir)
         if not progress_file.exists():
             print("   ❌ FAIL: Progress file not created")
@@ -75,7 +75,7 @@ def test_resume_integration():
         print(f"   ✅ Progress file created: {progress_file}")
 
         # Load progress and verify
-        from src.media_validation import _load_progress
+        from blink_pipeline.media_validation import _load_progress
         loaded = _load_progress(cache_dir)
         if not loaded:
             print("   ❌ FAIL: Could not load progress")
@@ -96,7 +96,7 @@ def test_resume_integration():
             completed_second[path] = {'validated_path': validated_path}
 
         # Save updated progress
-        from src.media_validation import _save_progress
+        from blink_pipeline.media_validation import _save_progress
         from datetime import datetime
         progress_data = {
             'start_time': loaded['start_time'],  # Preserve original start time
@@ -126,7 +126,7 @@ def test_resume_integration():
 
         # Simulate completion (delete progress file)
         print("\n3. Simulating completion (cleanup)...")
-        from src.media_validation import _delete_progress
+        from blink_pipeline.media_validation import _delete_progress
         _delete_progress(cache_dir)
 
         if progress_file.exists():
@@ -153,7 +153,7 @@ def test_resume_with_new_videos():
         # Second run: 30 videos (10 new)
         video_paths_v2 = create_mock_video_list(tmpdir, 30)
 
-        from src.media_validation import _load_progress
+        from blink_pipeline.media_validation import _load_progress
         loaded = _load_progress(cache_dir)
 
         if not loaded:
@@ -189,7 +189,7 @@ def test_resume_with_errors():
         video_paths = create_mock_video_list(tmpdir, 10)
 
         # Simulate processing with errors
-        from src.media_validation import _save_progress
+        from blink_pipeline.media_validation import _save_progress
         from datetime import datetime
 
         completed = {}
@@ -216,7 +216,7 @@ def test_resume_with_errors():
         print(f"Saved progress with {len(completed)} videos (5 repaired, 5 original)")
 
         # Load and verify
-        from src.media_validation import _load_progress
+        from blink_pipeline.media_validation import _load_progress
         loaded = _load_progress(cache_dir)
 
         if not loaded:

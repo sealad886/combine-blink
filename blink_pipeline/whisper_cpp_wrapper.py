@@ -184,7 +184,6 @@ class WhisperCppWrapper:
             "-m", str(self.model_path),
             "-f", str(audio_file),
             "--output-json",  # JSON output for easy parsing
-            "--print-progress", "false",  # Disable progress output
         ]
 
         # Add language if specified
@@ -194,9 +193,6 @@ class WhisperCppWrapper:
         # Add task (translate vs transcribe)
         if task == "translate":
             cmd.append("--translate")
-
-        # Add timestamps (always enabled for segment-level output)
-        cmd.append("--print-timestamps")
 
         # Device selection (whisper.cpp auto-detects, but we can hint)
         if self.device == "cpu":
@@ -234,8 +230,9 @@ class WhisperCppWrapper:
         Returns:
             Formatted transcription results
         """
-        # whisper.cpp with --output-json creates a .json file next to the audio
-        json_output = Path(audio_path).with_suffix(".json")
+        # whisper.cpp with --output-json appends .json to the original filename
+        # e.g., audio.wav -> audio.wav.json
+        json_output = Path(str(audio_path) + ".json")
 
         try:
             if json_output.exists():
@@ -246,10 +243,15 @@ class WhisperCppWrapper:
                 # Convert to openai-whisper format
                 segments = []
                 for i, segment in enumerate(data.get("transcription", [])):
+                    # Use offsets (in milliseconds) and convert to seconds for compatibility
+                    offsets = segment.get("offsets", {})
+                    start_ms = offsets.get("from", 0)
+                    end_ms = offsets.get("to", 0)
+
                     segments.append({
                         "id": i,
-                        "start": segment.get("timestamps", {}).get("from", "0:00:00.000"),
-                        "end": segment.get("timestamps", {}).get("to", "0:00:00.000"),
+                        "start": start_ms / 1000.0,  # Convert to seconds
+                        "end": end_ms / 1000.0,      # Convert to seconds
                         "text": segment.get("text", "").strip(),
                     })
 

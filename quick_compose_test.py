@@ -14,9 +14,9 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from src.discovery import discover_files
-from src.grouping import group_videos
-from src.multi_camera_composer import MultiCameraComposer
+from blink_pipeline.discovery import discover_files
+from blink_pipeline.grouping import group_videos
+from blink_pipeline.multi_camera_composer import MultiCameraComposer
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 

@@ -21,7 +21,7 @@ def test_imports():
     """Test that all repair-related imports work."""
     print("Testing imports...")
     try:
-        from src.media_utils import repair_video, probe_media_info, MediaInfo
+        from blink_pipeline.media_utils import repair_video, probe_media_info, MediaInfo
         print("✓ Core repair imports successful")
         print("  - repair_video")
         print("  - probe_media_info")
@@ -29,7 +29,7 @@ def test_imports():
 
         # Try importing transcription (may fail without torch/whisper)
         try:
-            from src.transcription import process_audio_for_transcription
+            from blink_pipeline.transcription import process_audio_for_transcription
             print("  - process_audio_for_transcription")
         except ImportError as e:
             print(f"  ⚠ transcription.py requires dependencies: {e}")
@@ -44,7 +44,7 @@ def test_media_info_structure():
     """Test MediaInfo dataclass with new fields."""
     print("\nTesting MediaInfo structure...")
     try:
-        from src.media_utils import MediaInfo
+        from blink_pipeline.media_utils import MediaInfo
 
         # Test with all fields
         info = MediaInfo(

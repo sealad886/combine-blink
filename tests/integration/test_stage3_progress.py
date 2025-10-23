@@ -14,8 +14,8 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from src.discovery import discover_files
-from src.grouping import group_videos
+from blink_pipeline.discovery import discover_files
+from blink_pipeline.grouping import group_videos
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -75,7 +75,7 @@ def main() -> int:
     logging.info("Running main pipeline - observe Stage 3 progress bars")
     logging.info("="*80 + "\n")
 
-    from src.orchestrator import main as orchestrator_main
+    from blink_pipeline.orchestrator import main as orchestrator_main
     orchestrator_main()
 
     return 0

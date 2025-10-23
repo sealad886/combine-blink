@@ -20,9 +20,9 @@ import numpy as np
 
 from PIL import Image
 
-from src.media_utils import probe_media_info
-from src.av_alignment import estimate_offsets_and_drift, estimate_per_clip_offsets
-from src.people_detection import PeopleDetector, PeopleDetectorConfig
+from blink_pipeline.media_utils import probe_media_info
+from blink_pipeline.av_alignment import estimate_offsets_and_drift, estimate_per_clip_offsets
+from blink_pipeline.people_detection import PeopleDetector, PeopleDetectorConfig
 
 
 @dataclass
@@ -221,7 +221,7 @@ class MultiCameraComposer:
         enc_cfg = self.composition_config.get('encoding', {})
         self._single_pass = bool(self.composition_config.get('single_pass_filter_complex', True))
         self._use_hw_encode = bool(enc_cfg.get('use_hw_encode', False))
-        self._hw_codec = str(enc_cfg.get('hw_codec', 'libx264'))
+        self._hw_codec = str(enc_cfg.get('hw_codec', 'h264_videotoolbox'))  # Default to macOS hardware encoder
         self._x264_preset = str(enc_cfg.get('x264_preset', 'veryfast'))
         self._x264_crf = str(enc_cfg.get('x264_crf', '22'))
         self._target_bitrate = str(enc_cfg.get('bitrate', '6000k'))
@@ -1659,7 +1659,7 @@ class MultiCameraComposer:
         """
         Sequential merge of clips from the same camera (fallback behavior).
         """
-        from src.video import merge_video_clips
+        from blink_pipeline.video import merge_video_clips
 
         video_paths = [clip['path'] for clip in sorted(video_clips, key=lambda x: x['datetime'])]
         crossfade = self.config.get('video_processing', {}).get('crossfade_duration', 0.5)
