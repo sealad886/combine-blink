@@ -56,16 +56,28 @@ def _format_hms(seconds: float) -> str:
 
 def _generate_group_name(group: List[Dict[str, Any]]) -> str:
     """
-    Generate a unique name for a video group.
-
-    For multi-camera groups, uses the earliest timestamp and lists all cameras.
-    For single-camera groups, uses timestamp and camera name.
-
+    Generate a unique, human-readable name for a video group.
+    
+    The group name encodes the timestamp and cameras involved, enabling:
+    - Easy identification of events in logs and file listings
+    - Consistent naming across pipeline stages
+    - Resume capability (detect existing outputs by name)
+    
+    Naming Format:
+    - Single camera: YYYYMMDD_HHMMSS_CameraName
+      Example: 20251019_083743_FrontDoor
+    - Multi-camera: YYYYMMDD_HHMMSS_Camera1+Camera2+Camera3
+      Example: 20251019_083743_FrontDoor+Corner+Backyard
+    - Many cameras: YYYYMMDD_HHMMSS_Camera1+Camera2+Camera3+Nmore
+      Example: 20251019_083743_Entry+Garage+Backyard+2more
+    
     Args:
-        group: List of video clip dictionaries
-
+        group: List of video clip dictionaries, each containing:
+            - datetime: datetime object for clip start time
+            - camera: String identifier for camera
+    
     Returns:
-        str: Unique group name
+        str: Unique group name (filesystem-safe, no special chars)
     """
     if not group:
         return "unknown"
@@ -97,7 +109,31 @@ def _get_profiles_path(config: Dict[str, Any]) -> str:
 
 
 def _load_profile_name_map(config: Dict[str, Any]) -> Dict[str, str]:
-    """Load a mapping of speaker_id -> friendly name from profiles.json if present."""
+    """
+    Load speaker name mappings from profiles.json and config.yaml.
+    
+    This function enables human-readable speaker names in transcripts by:
+    1. Loading names from output/speakers/profiles.json (user-editable)
+    2. Merging with config.yaml known_speakers (takes precedence)
+    3. Returning a map of speaker_id -> friendly_name
+    
+    Priority: config.yaml > profiles.json (allows overrides)
+    
+    File Format (profiles.json):
+    {
+      "speakers": {
+        "spk_001": {"name": "Alice", "samples": ["spk_001.wav"]},
+        "spk_002": {"name": "Bob", "samples": ["spk_002.wav"]}
+      }
+    }
+    
+    Args:
+        config: Pipeline configuration dictionary
+    
+    Returns:
+        Dict mapping speaker_id (str) -> name (str)
+        Empty dict if no profiles found or on error
+    """
     path = _get_profiles_path(config)
     names: Dict[str, str] = {}
     try:
@@ -184,11 +220,39 @@ def _write_speaker_profiles(config: Dict[str, Any]) -> Tuple[int, str]:
 
 
 def _transcribe_group_job(args: Tuple[str, List[str], Dict[str, Any], Any, Any]) -> Tuple[str, List[str], Optional[Dict[str, Any]]]:
-    """Worker: run Stage 3 for a single group and return processed paths and diarization.
-
-    Progress is tracked per-clip within the group, so progress bar shows:
-    - Total: number of clips in the group
-    - Progress: number of clips completed so far
+    """
+    Worker function for Stage 3: Transcription & Diarization of a single video group.
+    
+    This function runs in a separate worker process to enable parallel transcription
+    across multiple groups. It performs:
+    1. Cache lookup - Check for previously cached diarization results
+    2. Audio extraction - Extract audio from video clips
+    3. Whisper transcription - Convert speech to text (GPU-accelerated on Apple Silicon)
+    4. Pyannote diarization - Identify and label speakers
+    5. Cache storage - Save results for future runs
+    
+    Hardware Acceleration:
+    - Whisper: Core ML (Apple Silicon) or CUDA (NVIDIA) acceleration
+    - Pyannote: MPS (Apple Silicon) or CUDA device acceleration
+    
+    Args:
+        args: Tuple containing:
+            - group_name: Unique identifier for this video group
+            - video_paths: List of video file paths to process
+            - config: Pipeline configuration dictionary
+            - progress_dict: Shared dictionary for progress tracking
+            - task_id: Unique task identifier for progress updates
+    
+    Returns:
+        Tuple of (group_name, processed_video_paths, diarization_result)
+        - group_name: Same as input
+        - processed_video_paths: Paths to repaired/processed video files
+        - diarization_result: Dict with 'segments' and 'timeline' keys, or None
+    
+    Progress Tracking:
+    - Total: Number of clips in the group
+    - Progress: Number of clips completed so far
+    - Updates via shared progress_dict for real-time dashboard display
     """
     group_name, video_paths, config, progress_dict, task_id = args
 
@@ -271,7 +335,50 @@ def _transcribe_group_job(args: Tuple[str, List[str], Dict[str, Any], Any, Any])
 
 
 def _merge_group_job(args: Tuple[str, List[Dict[str, Any]], str, Dict[str, Any], Optional[Dict[str, Any]], Any, Any]) -> Tuple[str, bool, str]:
-    """Worker: run Stage 5 merge/composition for a single group."""
+    """
+    Worker function for Stage 5: Video composition/merging of a single group.
+    
+    This function runs in a separate worker process to enable parallel video
+    composition across multiple groups. It performs:
+    1. Camera analysis - Detect multiple cameras and select composition strategy
+    2. Audio quality analysis - Rank audio sources by quality
+    3. Audio/video alignment - Synchronize clips from different cameras
+    4. Timeline generation - Determine camera switching schedule
+    5. Video rendering - Compose final output with ffmpeg (hardware-accelerated)
+    
+    Hardware Acceleration:
+    - VideoToolbox (macOS): Hardware H.264 encoding via Media Engine
+    - NVENC (NVIDIA): Hardware encoding on GPU
+    - FFmpeg filter_complex: GPU-accelerated video processing where available
+    - Single-pass or multi-pass rendering based on configuration
+    
+    Camera Selection Strategies:
+    - time_based: Switch at regular intervals (predictable)
+    - round_robin: Cycle through cameras equally (balanced coverage)
+    - audio_quality: Prefer best audio at each moment (clarity-focused)
+    - speech_people: Anchor to speaking camera, show most people during silence
+    
+    Args:
+        args: Tuple containing:
+            - group_name: Unique identifier for this video group
+            - video_clips: List of clip dictionaries with metadata (path, camera, datetime, etc.)
+            - output_video_path: Destination path for composed video
+            - config: Pipeline configuration dictionary
+            - diarization_result: Optional speech segments from Stage 3
+            - progress_dict: Shared dictionary for progress tracking
+            - task_id: Unique task identifier for progress updates
+    
+    Returns:
+        Tuple of (group_name, success, output_video_path)
+        - group_name: Same as input
+        - success: True if composition succeeded, False otherwise
+        - output_video_path: Path to output file (same as input)
+    
+    Progress Tracking:
+    - Total: Number of clips being merged
+    - Progress: Current step in composition process
+    - Updates via shared progress_dict for real-time dashboard display
+    """
     group_name, video_clips, output_video_path, config, diarization_result, progress_dict, task_id = args
 
     # Configure worker logging (file-based, not console)
@@ -357,7 +464,28 @@ def _merge_group_job(args: Tuple[str, List[Dict[str, Any]], str, Dict[str, Any],
 
 
 def main():
-    """Main function to orchestrate the video processing pipeline."""
+    """
+    Main orchestrator for the Blink video processing pipeline.
+    
+    This function coordinates all pipeline stages in sequence:
+    1. File Discovery - Find video files in input directory
+    2. Video Grouping - Group clips by timestamp and camera
+    3. Video Validation & Repair - Fix corrupted/damaged clips
+    4. Transcription & Diarization - Extract and identify speech
+    5. Speaker Identification - Match speakers across events
+    6. Video Composition - Merge multi-camera footage intelligently
+    7. Final Transcription - Generate human-readable transcripts
+    8. Speaker Profiles - Export editable speaker information
+    
+    Hardware Acceleration:
+    - Uses VideoToolbox (macOS) or hardware encoders for video composition
+    - MPS (Apple Silicon) acceleration for speaker embeddings
+    - Core ML for Whisper transcription on Apple Silicon
+    - Parallel processing for I/O-bound stages (validation, merging)
+    
+    Returns:
+        None. Outputs are written to configured output directories.
+    """
     config = load_config()
     setup_directories(config)
 
