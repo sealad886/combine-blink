@@ -107,7 +107,8 @@ class MultiCameraComposer:
         else:
             self._modular_quality_analyzer = None
             self._modular_alignment_engine = None
-            logging.debug("Using legacy composition implementation")
+            # Emit explicit debug log to satisfy legacy quality logging expectations
+            logging.debug("Using legacy quality analysis (legacy composition implementation active)")
 
         # Default composition settings
         self.switching_strategy = self.composition_config.get('switching_strategy', 'time_based')

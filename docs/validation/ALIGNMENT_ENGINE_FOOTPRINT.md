@@ -2,8 +2,8 @@
 
 ## Executive Summary
 
-✅ **AlignmentEngine Footprint**: Clean, minimal, well-defined  
-✅ **Idempotency**: Validated across 7/9 tests (2 require librosa)  
+✅ **AlignmentEngine Footprint**: Clean, minimal, well-defined
+✅ **Idempotency**: Validated across 7/9 tests (2 require librosa)
 ⚠️ **Issue Found**: Stub `composer.py` has incorrect API signature
 
 ---
@@ -65,7 +65,7 @@ class CachedAlignmentEngine(AlignmentEngine):
 
 **Dependency Footprint**: Minimal
 - Core algorithm uses only numpy (FFT, array ops)
-- Audio I/O isolated to `_extract_audio_segment` 
+- Audio I/O isolated to `_extract_audio_segment`
 - Lazy librosa import (only loaded when needed)
 
 ### Method Signatures
@@ -76,7 +76,7 @@ class CachedAlignmentEngine(AlignmentEngine):
 # AlignmentEngine.__init__
 def __init__(self, config: AlignmentConfig) -> None:
     """Initialize with configuration only."""
-    
+
 # AlignmentEngine.align_clips
 def align_clips(
     self,
@@ -85,14 +85,14 @@ def align_clips(
 ) -> List[AlignmentResult]:
     """
     Align all cameras to reference.
-    
+
     Args:
         camera_clips: {camera_name: [clip_paths]}
         ref_camera: Reference camera identifier
-        
+
     Returns:
         List of AlignmentResult (excludes reference)
-        
+
     Raises:
         ValueError: If ref_camera not found or has no clips
     """
@@ -106,7 +106,7 @@ def _estimate_offset(camera_clip, ref_clip) -> Tuple[float, Optional[float], flo
 
 def _gcc_phat(sig, refsig, fs, max_tau, interp) -> float:
     """GCC-PHAT algorithm, returns time delay in seconds"""
-    
+
 def _extract_audio_segment(clip_path, start_seconds, duration_seconds) -> Optional[np.ndarray]:
     """Extract audio using audio_cache, returns None on failure"""
 ```
@@ -164,7 +164,7 @@ if self._use_modular_composition and self._modular_alignment_engine:
    - Requires librosa (not in test environment)
    - Would validate full alignment pipeline idempotency
 
-⏭️  SKIPPED: test_cache_hit_returns_identical_results  
+⏭️  SKIPPED: test_cache_hit_returns_identical_results
    - Requires librosa (not in test environment)
    - Would validate cache consistency
 
@@ -265,11 +265,11 @@ self.alignment_engine = CachedAlignmentEngine(
 )
 ```
 
-**Impact**: 
+**Impact**:
 - Phase 5 stub will fail when implemented
 - API mismatch with actual AlignmentEngine
 
-**Recommendation**: 
+**Recommendation**:
 - Fix stub before Phase 5 implementation
 - Use `CachedAlignmentEngine` (not base `AlignmentEngine`)
 - Remove `cache_dir` parameter (not part of API)
@@ -283,7 +283,7 @@ from .alignment import CachedAlignmentEngine  # Not AlignmentEngine
 class ModularComposer:
     def __init__(self, config_dict: Dict[str, Any]):
         self.config = CompositionConfig.from_dict(...)
-        
+
         # Use CachedAlignmentEngine with single config parameter
         self.alignment_engine = CachedAlignmentEngine(
             self.config.audio_alignment

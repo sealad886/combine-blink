@@ -1,20 +1,23 @@
+
 """
 Pipeline Dashboard - Unified Rich display for entire video processing pipeline.
-
+IMPORTANT:
+Use STAGE_DEFINITIONS as the single source of stage keys/names in orchestrator.py and elsewhere.
+All progress, status, and timing for display should be managed via PipelineDashboard methods.
+Do not duplicate stage keys/names or progress logic in orchestrator.py.
 Provides a live-updating dashboard that shows:
-- Overall pipeline progress
-- Current stage with detailed progress
-- Statistics for each stage
-- Real-time status updates
+Overall pipeline progress
+Current stage with detailed progress
+Statistics for each stage
+Real-time status updates
 """
 
+from typing import Tuple, Dict, Optional, List, Any
 import copy
 import time
 from datetime import datetime, timedelta
-from typing import Dict, Optional, List, Any
 from dataclasses import dataclass, field
 from enum import Enum
-
 from rich.console import Console
 from rich.live import Live
 from rich.layout import Layout
@@ -24,6 +27,10 @@ from rich.table import Table
 from rich.text import Text
 from rich import box
 
+from .stages import StageKey, validate_stage_key
+
+
+
 
 class StageStatus(Enum):
     """Status of a pipeline stage."""
@@ -32,7 +39,6 @@ class StageStatus(Enum):
     COMPLETE = "complete"
     SKIPPED = "skipped"
     ERROR = "error"
-
 
 @dataclass
 class StageInfo:
@@ -45,6 +51,16 @@ class StageInfo:
     end_time: Optional[float] = None
     details: str = ""
     substages: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+
+
+STAGE_DEFINITIONS = [
+    (StageKey.VALIDATION, "Video Validation & Repair"),
+    (StageKey.TRANSCRIPTION, "Transcription & Diarization"),
+    (StageKey.SPEAKER_ID, "Speaker Identification"),
+    (StageKey.MERGE, "Video Merging/Composition"),
+    (StageKey.FINAL_TRANSCRIPTION, "Final Video Transcription"),
+    ("speaker_profiles", "Speaker Profiles Export"),  # TODO: Add to StageKey enum if needed
+]
 
 
 class PipelineDashboard:
@@ -71,16 +87,18 @@ class PipelineDashboard:
         # Pipeline start time
         self.start_time = time.time()
 
-        # Stage tracking
-        self.stages: Dict[str, StageInfo] = {
-            "validation": StageInfo("Video Validation & Repair", total=total_videos),
-            "transcription": StageInfo("Transcription & Diarization", total=total_groups),
-            "speaker_id": StageInfo("Speaker Identification", total=total_groups),
-            "merge": StageInfo("Video Merging/Composition", total=total_groups),
-            # New post-merge stages
-            "final_transcription": StageInfo("Final Video Transcription", total=total_groups),
-            "speaker_profiles": StageInfo("Speaker Profiles Export", total=0),
-        }
+        # Stage tracking (single source of truth from STAGE_DEFINITIONS)
+        self.stages: Dict[str, StageInfo] = {}
+        for key, name in STAGE_DEFINITIONS:
+            if key == "validation":
+                total = total_videos
+            elif key in ("transcription", "speaker_id", "merge", "final_transcription"):
+                total = total_groups
+            elif key == "speaker_profiles":
+                total = 0
+            else:
+                total = 0
+            self.stages[key] = StageInfo(name, total=total)
 
         # Current stage
         self.current_stage: Optional[str] = None
@@ -100,6 +118,63 @@ class PipelineDashboard:
             TimeRemainingColumn(),
         )
         self.progress_tasks: Dict[str, Any] = {}
+
+    def set_stage_total(self, stage_key: str, total: int):
+        """
+        Set the total count for a stage (if it changes after initialization).
+
+        Args:
+            stage_key: Key of the stage
+            total: New total count
+
+        Raises:
+            ValueError: If stage_key is not valid
+        """
+        validate_stage_key(stage_key)
+        if stage_key in self.stages:
+            self.stages[stage_key].total = total
+            if stage_key in self.progress_tasks:
+                self.progress.update(self.progress_tasks[stage_key], total=total)
+            self.update()
+
+    def error_stage(self, stage_key: str, details: str = ""):
+        """
+        Mark a stage as errored.
+
+        Args:
+            stage_key: Key of the stage
+            details: Optional error details
+
+        Raises:
+            ValueError: If stage_key is not valid
+        """
+        validate_stage_key(stage_key)
+        if stage_key in self.stages:
+            stage = self.stages[stage_key]
+            stage.status = StageStatus.ERROR
+            stage.end_time = time.time()
+            if details:
+                stage.details = details
+            self.update()
+
+    def get_stage_timings(self) -> Dict[str, Tuple[float, float, float]]:
+        """
+        Get timing info for each stage.
+        Returns a dict: {stage_key: (start_time, end_time, duration)}
+        """
+        timings = {}
+        for key, stage in self.stages.items():
+            start = stage.start_time or 0
+            end = stage.end_time or 0
+            duration = (end - start) if (end and start) else 0
+            timings[key] = (start, end, duration)
+        return timings
+
+    def get_total_pipeline_time(self) -> float:
+        """
+        Get total pipeline elapsed time (seconds).
+        """
+        return time.time() - self.start_time
 
     def start(self):
         """Start the live dashboard display."""
@@ -252,7 +327,7 @@ class PipelineDashboard:
             table.add_column("Progress", width=17)
             table.add_column("Time", width=10, style="dim", no_wrap=True)
 
-            completed_table = copy.deepcopy(table)
+            completed_table: list[tuple] = []
 
             for name, info in list(stage.substages.items())[:20]:  # Show up to 20
                 if info.get('visible', True):
@@ -272,11 +347,11 @@ class PipelineDashboard:
                         if end_time is not None:
                             # Completed - show final elapsed time
                             elapsed = int(end_time - start_time)
-                            completed_table.add_row(
+                            completed_table.append((
                                 name[:40],
                                 f"{bar} {completed}/{total}",
                                 f"✓ {elapsed}s"
-                            )
+                            ))
                             continue
                         else:
                             # Still running - show current elapsed time
@@ -290,10 +365,10 @@ class PipelineDashboard:
                         f"{bar} {completed}/{total}",
                         time_text
                     )
-            if completed_table.row_count > 0:
+            if len(completed_table) > 0:
                 table.add_section()
-                for row in completed_table.rows:
-                    table.add_row(*row.cells)
+                for row in completed_table:
+                    table.add_row(*row)
             if len(stage.substages) > 20:
                 table.add_row(
                     f"... and {len(stage.substages) - 20} more",
@@ -350,7 +425,11 @@ class PipelineDashboard:
         Args:
             stage_key: Key of the stage (e.g., 'validation', 'transcription')
             total: Total items for this stage (optional, overrides initial value)
+
+        Raises:
+            ValueError: If stage_key is not valid
         """
+        validate_stage_key(stage_key)
         if stage_key in self.stages:
             stage = self.stages[stage_key]
             stage.status = StageStatus.RUNNING
@@ -377,7 +456,11 @@ class PipelineDashboard:
             stage_key: Key of the stage
             completed: Number of items completed
             details: Optional details text
+
+        Raises:
+            ValueError: If stage_key is not valid
         """
+        validate_stage_key(stage_key)
         if stage_key in self.stages:
             stage = self.stages[stage_key]
             stage.completed = completed
@@ -396,7 +479,11 @@ class PipelineDashboard:
         Args:
             stage_key: Key of the stage
             details: Optional completion details
+
+        Raises:
+            ValueError: If stage_key is not valid
         """
+        validate_stage_key(stage_key)
         if stage_key in self.stages:
             stage = self.stages[stage_key]
             stage.status = StageStatus.COMPLETE
@@ -414,7 +501,11 @@ class PipelineDashboard:
         Args:
             stage_key: Key of the stage
             reason: Reason for skipping
+
+        Raises:
+            ValueError: If stage_key is not valid
         """
+        validate_stage_key(stage_key)
         if stage_key in self.stages:
             stage = self.stages[stage_key]
             stage.status = StageStatus.SKIPPED
@@ -429,7 +520,11 @@ class PipelineDashboard:
             stage_key: Key of the parent stage
             substage_name: Name of the substage (e.g., group name)
             total: Total items in this substage
+
+        Raises:
+            ValueError: If stage_key is not valid
         """
+        validate_stage_key(stage_key)
         if stage_key in self.stages:
             self.stages[stage_key].substages[substage_name] = {
                 'progress': 0,
@@ -448,7 +543,11 @@ class PipelineDashboard:
             stage_key: Key of the parent stage
             substage_name: Name of the substage
             progress: Current progress
+
+        Raises:
+            ValueError: If stage_key is not valid
         """
+        validate_stage_key(stage_key)
         if stage_key in self.stages:
             if substage_name in self.stages[stage_key].substages:
                 substage = self.stages[stage_key].substages[substage_name]
@@ -471,7 +570,11 @@ class PipelineDashboard:
         Args:
             stage_key: Key of the parent stage
             substage_name: Name of the substage
+
+        Raises:
+            ValueError: If stage_key is not valid
         """
+        validate_stage_key(stage_key)
         if stage_key in self.stages:
             if substage_name in self.stages[stage_key].substages:
                 self.stages[stage_key].substages[substage_name]['visible'] = False

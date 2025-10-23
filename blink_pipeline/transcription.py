@@ -393,7 +393,7 @@ class _PyannoteDiarizer:
         self.settings = settings
         logging.info("Loading pyannote pipeline '%s'", settings.model_id)
         # Avoid strict typing here so module can import without pyannote installed in test envs
-        self.pipeline: Pipeline = Pipeline.from_pretrained(settings.model_id, token=settings.auth_token)
+        self.pipeline: Pipeline = Pipeline.from_pretrained(settings.model_id, use_auth_token=settings.auth_token)
 
     def diarize_file(self, audio_path: str) -> Any:
         """Run diarization and return Annotation object."""

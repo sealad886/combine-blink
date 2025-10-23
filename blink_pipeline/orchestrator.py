@@ -16,7 +16,8 @@ from .transcription import process_audio_for_transcription
 from .identify_speaker import SpeakerIdentifier
 from .video import merge_video_clips
 from .multi_camera_composer import MultiCameraComposer
-from .pipeline_dashboard import PipelineDashboard
+from .pipeline_dashboard import PipelineDashboard, STAGE_DEFINITIONS
+from .stages import StageKey
 from .logging_config import setup_pipeline_logging, configure_worker_logging
 
 def load_config():
@@ -364,6 +365,9 @@ def main():
     pipeline_logger = setup_pipeline_logging(config)
     logger = pipeline_logger.get_logger()
 
+    # Stage keys are defined in STAGE_DEFINITIONS (imported from pipeline_dashboard)
+    # All progress, status, and timing updates go through the dashboard instance
+
     # Optional standalone modes
     if len(sys.argv) > 1:
         mode = sys.argv[1].strip().lower()
@@ -564,10 +568,10 @@ def main():
     # Start dashboard
     with dashboard:
         # Start validation stage
-        dashboard.start_stage('validation', len(all_video_paths))
+        dashboard.start_stage(StageKey.VALIDATION, len(all_video_paths))
 
         def update_progress(completed, total):
-            dashboard.update_stage('validation', completed, f"{completed}/{total} videos")
+            dashboard.update_stage(StageKey.VALIDATION, completed, f"{completed}/{total} videos")
 
         # Preprocess all videos
         conc = (config.get('concurrency') or {})
@@ -585,7 +589,7 @@ def main():
 
         # Get and display statistics
         total_validated, repaired_count, original_count = get_validation_stats(path_mapping)
-        dashboard.complete_stage('validation', f"{repaired_count} repaired, {original_count} original")
+        dashboard.complete_stage(StageKey.VALIDATION, f"{repaired_count} repaired, {original_count} original")
 
     print(f"\n✓ Validation complete:")
     print(f"  • {total_validated} videos processed")
@@ -643,12 +647,12 @@ def main():
         jobs_to_process = group_jobs
 
         if cached_groups:
-            dashboard.stages['transcription'].details = f"Found {len(cached_groups)} cached results"
+            dashboard.stages[StageKey.TRANSCRIPTION].details = f"Found {len(cached_groups)} cached results"
 
-        dashboard.start_stage('transcription', len(group_jobs))
+        dashboard.start_stage(StageKey.TRANSCRIPTION, len(group_jobs))
 
         if not jobs_to_process:
-            dashboard.skip_stage('transcription', "All groups already transcribed")
+            dashboard.skip_stage(StageKey.TRANSCRIPTION, "All groups already transcribed")
         else:
             try:
                 with multiprocessing.Manager() as manager:
@@ -662,7 +666,7 @@ def main():
                             video_paths = job[1]
 
                             # Add substage for each group
-                            dashboard.add_substage('transcription', group_name, len(video_paths))
+                            dashboard.add_substage(StageKey.TRANSCRIPTION, group_name, len(video_paths))
 
                             task_id = f"transcription_{group_name}"
                             job_with_progress = (job[0], job[1], job[2], _progress, task_id)
@@ -671,7 +675,7 @@ def main():
                         # Monitor progress
                         while True:
                             n_finished = sum([future.done() for future in futures])
-                            dashboard.update_stage('transcription', completed_count + n_finished,
+                            dashboard.update_stage(StageKey.TRANSCRIPTION, completed_count + n_finished,
                                                  f"Processing {n_finished}/{len(jobs_to_process)} groups")
 
                             # Update individual group progress from shared dict
@@ -679,7 +683,7 @@ def main():
                                 if isinstance(update_data, dict) and task_id.startswith('transcription_'):
                                     group_name = task_id.replace('transcription_', '')
                                     latest = update_data.get("progress", 0)
-                                    dashboard.update_substage('transcription', group_name, latest)
+                                    dashboard.update_substage(StageKey.TRANSCRIPTION, group_name, latest)
 
                             if n_finished >= len(futures):
                                 break
@@ -692,14 +696,14 @@ def main():
                                 gname, processed_video_paths, diarization_result = fut.result()
                                 stage3_results[gname] = (processed_video_paths, diarization_result)
                                 completed_count += 1
-                                dashboard.remove_substage('transcription', gname)
+                                dashboard.remove_substage(StageKey.TRANSCRIPTION, gname)
                             except Exception as exc:
                                 stage3_results[group_name] = ([], None)
                                 completed_count += 1
-                                dashboard.remove_substage('transcription', group_name)
+                                dashboard.remove_substage(StageKey.TRANSCRIPTION, group_name)
                                 logger.error(f"Transcription failed for {group_name}: {exc}")
 
-                dashboard.complete_stage('transcription', f"{completed_count} groups processed")
+                dashboard.complete_stage(StageKey.TRANSCRIPTION, f"{completed_count} groups processed")
                 pipeline_logger.log_stage_end("Transcription & Diarization", 3, success=True,
                                             details=f"{completed_count} groups processed")
 
@@ -716,7 +720,7 @@ def main():
         pipeline_logger.log_stage_start("Speaker Identification", 4,
                                        f"{groups_with_speech} groups with speech")
 
-        dashboard.start_stage('speaker_id', groups_with_speech if groups_with_speech > 0 else len(video_groups))
+        dashboard.start_stage(StageKey.SPEAKER_ID, groups_with_speech if groups_with_speech > 0 else len(video_groups))
         speaker_identifier = SpeakerIdentifier(config)
         speaker_id_completed = 0
 
@@ -738,12 +742,12 @@ def main():
                         text = entry.get('text', '')
                         f.write(f"{speaker}: {text}\n")
                 speaker_id_completed += 1
-                dashboard.update_stage('speaker_id', speaker_id_completed, f"Processed: {group_name}")
+                dashboard.update_stage(StageKey.SPEAKER_ID, speaker_id_completed, f"Processed: {group_name}")
             else:
                 speaker_id_completed += 1
-                dashboard.update_stage('speaker_id', speaker_id_completed, f"Skipped (no speech): {group_name}")
+                dashboard.update_stage(StageKey.SPEAKER_ID, speaker_id_completed, f"Skipped (no speech): {group_name}")
 
-        dashboard.complete_stage('speaker_id', f"{speaker_id_completed} groups processed")
+        dashboard.complete_stage(StageKey.SPEAKER_ID, f"{speaker_id_completed} groups processed")
         logger.info(f"Speaker identification complete: {speaker_id_completed} groups processed")
         pipeline_logger.log_stage_end("Speaker Identification", 4, success=True,
                                      details=f"{speaker_id_completed} groups processed")
@@ -788,16 +792,16 @@ def main():
         pipeline_logger.log_stage_start("Video Merging/Composition", 5,
                                        f"{len(merge_jobs)} groups to merge, {merge_workers} workers")
 
-        dashboard.start_stage('merge', len(merge_jobs) + len(existing_videos))
+        dashboard.start_stage(StageKey.MERGE, len(merge_jobs) + len(existing_videos))
         merge_success_count = len(existing_videos)  # Count existing videos as successes
         merge_completed = len(existing_videos)
 
         if len(existing_videos) > 0:
-            dashboard.stages['merge'].details = f"Resuming: {len(existing_videos)} already complete"
+            dashboard.stages[StageKey.MERGE].details = f"Resuming: {len(existing_videos)} already complete"
             logger.info(f"Resuming merge: {len(existing_videos)} groups already merged")
 
         if not merge_jobs:
-            dashboard.skip_stage('merge', "All videos already merged")
+            dashboard.skip_stage(StageKey.MERGE, "All videos already merged")
         else:
             try:
                 with multiprocessing.Manager() as manager:
@@ -811,7 +815,7 @@ def main():
                             video_clips = job[1]  # List of clip dicts
 
                             # Add substage showing number of clips in this group
-                            dashboard.add_substage('merge', group_name, len(video_clips))
+                            dashboard.add_substage(StageKey.MERGE, group_name, len(video_clips))
 
                             task_id = f"merge_{group_name}"
                             job_with_progress = (job[0], job[1], job[2], job[3], job[4], _progress, task_id)
@@ -820,7 +824,7 @@ def main():
                         # Monitor progress
                         while True:
                             n_finished = sum([future.done() for future in futures])
-                            dashboard.update_stage('merge', merge_completed + n_finished,
+                            dashboard.update_stage(StageKey.MERGE, merge_completed + n_finished,
                                                  f"Merging {n_finished}/{len(merge_jobs)} groups")
 
                             # Update individual group progress from shared dict
@@ -830,7 +834,7 @@ def main():
                                     latest = update_data.get("progress", 0)
                                     total = update_data.get("total", 0)
                                     logger.debug(f"[MONITOR] Reading progress for {group_name}: {latest}/{total}")
-                                    dashboard.update_substage('merge', group_name, latest)
+                                    dashboard.update_substage(StageKey.MERGE, group_name, latest)
 
                             if n_finished >= len(futures):
                                 break
@@ -846,13 +850,13 @@ def main():
                                 else:
                                     logger.warning(f"Merge failed for {gname}")
                                 merge_completed += 1
-                                dashboard.remove_substage('merge', gname)
+                                dashboard.remove_substage(StageKey.MERGE, gname)
                             except Exception as exc:
                                 merge_completed += 1
-                                dashboard.remove_substage('merge', group_name)
+                                dashboard.remove_substage(StageKey.MERGE, group_name)
                                 logger.error(f"Merge error for {group_name}: {exc}")
 
-                dashboard.complete_stage('merge', f"{merge_success_count} groups merged")
+                dashboard.complete_stage(StageKey.MERGE, f"{merge_success_count} groups merged")
                 logger.info(f"Merge complete: {merge_success_count}/{merge_completed} groups successful")
                 pipeline_logger.log_stage_end("Video Merging/Composition", 5, success=True,
                                             details=f"{merge_success_count} groups merged")
@@ -878,7 +882,7 @@ def main():
         pipeline_logger.log_stage_start("Final Video Transcription", 6,
                                        f"{len(merged_videos)} merged videos")
 
-        dashboard.start_stage('final_transcription', len(merged_videos))
+        dashboard.start_stage(StageKey.FINAL_TRANSCRIPTION, len(merged_videos))
 
         # Prepare SpeakerIdentifier and merge in profile names
         try:
@@ -893,19 +897,19 @@ def main():
         ft_completed = 0
         for group_name, video_path in merged_videos:
             # Add substage for this group
-            dashboard.add_substage('final_transcription', group_name, 3)  # 3 steps: load, transcribe, write
+            dashboard.add_substage(StageKey.FINAL_TRANSCRIPTION, group_name, 3)  # 3 steps: load, transcribe, write
 
             out_txt = os.path.join(transcripts_final_dir, f"{group_name}_final_transcript.txt")
             if os.path.exists(out_txt):
                 ft_completed += 1
-                dashboard.update_substage('final_transcription', group_name, 3)
-                dashboard.update_stage('final_transcription', ft_completed, f"Skip (exists): {group_name}")
-                dashboard.remove_substage('final_transcription', group_name)
+                dashboard.update_substage(StageKey.FINAL_TRANSCRIPTION, group_name, 3)
+                dashboard.update_stage(StageKey.FINAL_TRANSCRIPTION, ft_completed, f"Skip (exists): {group_name}")
+                dashboard.remove_substage(StageKey.FINAL_TRANSCRIPTION, group_name)
                 continue
 
             # Step 1: Extract start time from group_name (format: YYYYMMDD_HHMMSS_Cameras)
             # Example: 20251015_215513_Entry+Frontdoor
-            dashboard.update_substage('final_transcription', group_name, 1)
+            dashboard.update_substage(StageKey.FINAL_TRANSCRIPTION, group_name, 1)
             video_start_time = None
             try:
                 parts = group_name.split('_')
@@ -921,10 +925,10 @@ def main():
             diarization_result = None
             try:
                 diarization_result = process_audio_for_transcription([video_path], config)
-                dashboard.update_substage('final_transcription', group_name, 2)
+                dashboard.update_substage(StageKey.FINAL_TRANSCRIPTION, group_name, 2)
             except Exception as exc:
                 logger.warning("Final transcription diarization failed for %s: %s", group_name, exc)
-                dashboard.update_substage('final_transcription', group_name, 2)
+                dashboard.update_substage(StageKey.FINAL_TRANSCRIPTION, group_name, 2)
 
             # Step 3: Format and write transcript
             lines: List[str] = []
@@ -1018,11 +1022,11 @@ def main():
             with open(out_txt, 'w', encoding='utf-8') as fh:
                 fh.write("\n".join(lines) + ("\n" if lines else ""))
             ft_completed += 1
-            dashboard.update_substage('final_transcription', group_name, 3)
-            dashboard.update_stage('final_transcription', ft_completed, f"Done: {group_name}")
-            dashboard.remove_substage('final_transcription', group_name)
+            dashboard.update_substage(StageKey.FINAL_TRANSCRIPTION, group_name, 3)
+            dashboard.update_stage(StageKey.FINAL_TRANSCRIPTION, ft_completed, f"Done: {group_name}")
+            dashboard.remove_substage(StageKey.FINAL_TRANSCRIPTION, group_name)
 
-        dashboard.complete_stage('final_transcription', f"{ft_completed} videos transcribed")
+        dashboard.complete_stage(StageKey.FINAL_TRANSCRIPTION, f"{ft_completed} videos transcribed")
         pipeline_logger.log_stage_end("Final Video Transcription", 6, success=True,
                                       details=f"{ft_completed} videos")
 

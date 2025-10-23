@@ -1,5 +1,5 @@
 paths:
-  input_dir: 25-10-15
+  input_dir: /Volumes/scritch/blink/25-10/25-10-15
   output_dir: output
   videos_dir: merged_videos
   transcripts_dir: transcripts
@@ -24,7 +24,7 @@ multi_camera_composition:
   # FEATURE FLAG: Use modular composition architecture (refactored)
   # Set to false to use original monolithic implementation
   # This flag enables progressive rollout with instant rollback capability
-  use_modular_composition: false
+  use_modular_composition: true
 
   # Switching strategy: how to decide which camera to show when
   # Options: 'time_based', 'round_robin', 'audio_quality', 'speech_people'
@@ -187,7 +187,7 @@ transcription:
     # For non-Core ML (CPU/GPU/Metal):
     #   ggml_model_path: /path/to/whisper.cpp/models/ggml-medium.en.bin  # Standard GGML model
     #   device: auto  # or cpu, cuda, metal
-    ggml_model_path: /Users/andrew/zzCoding-play/whisper.cpp/models/ggml-whisper-large-v3-turbo.bin
+    ggml_model_path: /Users/andrew/zzCoding-play/whisper.cpp/models/models/coreml-encoder-large-v3-turbo.mlmodelc
 
     # Path to whisper.cpp binary (auto-detected if in PATH or standard locations)
     # Leave commented out for auto-detection, or specify explicit path:
@@ -199,7 +199,7 @@ transcription:
     #   - 'cpu': CPU-only inference
     #   - 'cuda': NVIDIA GPU acceleration (requires CUDA build)
     #   - 'metal': Metal GPU acceleration (macOS)
-    device: auto
+    device: coreml
 
     beam_size: 5
     temperature: 0.0
