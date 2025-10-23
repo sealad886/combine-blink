@@ -221,7 +221,7 @@ class MultiCameraComposer:
         enc_cfg = self.composition_config.get('encoding', {})
         self._single_pass = bool(self.composition_config.get('single_pass_filter_complex', True))
         self._use_hw_encode = bool(enc_cfg.get('use_hw_encode', False))
-        self._hw_codec = str(enc_cfg.get('hw_codec', 'h264_videotoolbox'))  # Default to macOS hardware encoder
+        self._hw_codec = str(enc_cfg.get('hw_codec', 'libx264'))
         self._x264_preset = str(enc_cfg.get('x264_preset', 'veryfast'))
         self._x264_crf = str(enc_cfg.get('x264_crf', '22'))
         self._target_bitrate = str(enc_cfg.get('bitrate', '6000k'))

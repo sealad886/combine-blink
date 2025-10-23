@@ -108,10 +108,10 @@ multi_camera_composition:
   # Performance and encoding options
   single_pass_filter_complex: true  # One-shot ffmpeg composition (faster)
   encoding:
-    use_hw_encode: true             # Enable hardware encode (videotoolbox/qsv/amf/nvenc)
-    hw_codec: h264_videotoolbox     # Hardware codec (macOS: h264_videotoolbox, Windows: h264_nvenc/h264_qsv/h264_amf)
-    x264_preset: veryfast           # Software encode preset (used when use_hw_encode: false)
-    x264_crf: '22'                  # Software encode quality (libx264 fallback)
+    use_hw_encode: false            # Enable hardware encode (videotoolbox/qsv/amf/nvenc)
+    hw_codec: libx264     # Used when use_hw_encode is true
+    x264_preset: veryfast           # Software encode preset
+    x264_crf: '22'                  # Software encode quality
     bitrate: 6000k                  # Hardware encode target bitrate
 ```
 

@@ -21,6 +21,11 @@ multi_camera_composition:
   # Enable multi-camera composition (set to false to use old sequential merge)
   enable_composition: true
 
+  # FEATURE FLAG: Use modular composition architecture (refactored)
+  # Set to false to use original monolithic implementation
+  # This flag enables progressive rollout with instant rollback capability
+  use_modular_composition: false
+
   # Switching strategy: how to decide which camera to show when
   # Options: 'time_based', 'round_robin', 'audio_quality', 'speech_people'
   # - time_based: Switch cameras at regular intervals
@@ -182,7 +187,7 @@ transcription:
     # For non-Core ML (CPU/GPU/Metal):
     #   ggml_model_path: /path/to/whisper.cpp/models/ggml-medium.en.bin  # Standard GGML model
     #   device: auto  # or cpu, cuda, metal
-    ggml_model_path: /Users/andrew/zzCoding-play/whisper.cpp/models/models/coreml-encoder-large-v3-turbo.mlmodelc
+    ggml_model_path: /Users/andrew/zzCoding-play/whisper.cpp/models/ggml-whisper-large-v3-turbo.bin
 
     # Path to whisper.cpp binary (auto-detected if in PATH or standard locations)
     # Leave commented out for auto-detection, or specify explicit path:
@@ -227,12 +232,12 @@ concurrency:
   # Stage 3: Transcription and diarization (compute-bound, uses AI models)
   # Keep at 2 to avoid memory pressure; Core ML and MPS models use significant unified memory
   # Each worker loads Whisper + diarization models (~4-6GB per worker)
-  transcription_workers: 3
+  transcription_workers: 2
 
   # Stage 5: Video merging and composition (I/O-bound, uses ffmpeg with VideoToolbox)
   # Increased to 4 for parallel hardware encoding; VideoToolbox offloads to Media Engine
   # Apple Silicon's dedicated video encoders can handle multiple streams efficiently
-  merge_workers: 2
+  merge_workers: 1
 
 # Logging configuration
 logging:
