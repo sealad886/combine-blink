@@ -3,7 +3,7 @@ Test script to verify merge substages show correct clip counts.
 """
 
 import time
-from src.pipeline_dashboard import PipelineDashboard
+from blink_pipeline.pipeline_dashboard import PipelineDashboard
 
 def main():
     """Test merge substages with varying clip counts."""

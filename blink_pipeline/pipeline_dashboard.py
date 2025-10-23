@@ -8,6 +8,7 @@ Provides a live-updating dashboard that shows:
 - Real-time status updates
 """
 
+import copy
 import time
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List, Any
@@ -76,6 +77,9 @@ class PipelineDashboard:
             "transcription": StageInfo("Transcription & Diarization", total=total_groups),
             "speaker_id": StageInfo("Speaker Identification", total=total_groups),
             "merge": StageInfo("Video Merging/Composition", total=total_groups),
+            # New post-merge stages
+            "final_transcription": StageInfo("Final Video Transcription", total=total_groups),
+            "speaker_profiles": StageInfo("Speaker Profiles Export", total=0),
         }
 
         # Current stage
@@ -113,7 +117,8 @@ class PipelineDashboard:
             self.layout,
             console=self.console,
             refresh_per_second=4,
-            screen=False
+            screen=False,
+            auto_refresh=True,
         )
         self.live.start()
 
@@ -247,7 +252,9 @@ class PipelineDashboard:
             table.add_column("Progress", width=17)
             table.add_column("Time", width=10, style="dim", no_wrap=True)
 
-            for name, info in list(stage.substages.items())[:10]:  # Show up to 10
+            completed_table = copy.deepcopy(table)
+
+            for name, info in list(stage.substages.items())[:20]:  # Show up to 20
                 if info.get('visible', True):
                     completed = info.get('progress', 0)
                     total = info.get('total', 1)
@@ -265,6 +272,12 @@ class PipelineDashboard:
                         if end_time is not None:
                             # Completed - show final elapsed time
                             elapsed = int(end_time - start_time)
+                            completed_table.add_row(
+                                name[:40],
+                                f"{bar} {completed}/{total}",
+                                f"✓ {elapsed}s"
+                            )
+                            continue
                         else:
                             # Still running - show current elapsed time
                             elapsed = int(time.time() - start_time)
@@ -277,10 +290,13 @@ class PipelineDashboard:
                         f"{bar} {completed}/{total}",
                         time_text
                     )
-
-            if len(stage.substages) > 10:
+            if completed_table.row_count > 0:
+                table.add_section()
+                for row in completed_table.rows:
+                    table.add_row(*row.cells)
+            if len(stage.substages) > 20:
                 table.add_row(
-                    f"... and {len(stage.substages) - 10} more",
+                    f"... and {len(stage.substages) - 20} more",
                     "",
                     style="dim"
                 )

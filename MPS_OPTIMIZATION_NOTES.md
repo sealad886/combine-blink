@@ -6,16 +6,16 @@ The configuration has been optimized for Apple Silicon Macs (M1/M2/M3/M4) with M
 ## Key Optimizations Applied
 
 ### 1. Hardware Video Encoding (VideoToolbox)
-**Change:** Enabled `use_hw_encode: true` with `libx264`
+**Change:** Enabled `use_hw_encode: true` with `h264_videotoolbox` (hardware encoder)
 **Impact:** ~5-10x faster video encoding vs software (libx264)
 **Quality:** Increased bitrate to 8Mbps (from 6Mbps) for excellent 1080p quality
 **Benefit:** Apple Silicon's dedicated Media Engine handles encoding off-CPU, freeing resources for other tasks
 
 ```yaml
 encoding:
-  use_hw_encode: true         # Enable VideoToolbox
-  hw_codec: libx264
-  bitrate: 8000k              # 8Mbps for high quality
+  use_hw_encode: true         # Enable VideoToolbox hardware acceleration
+  hw_codec: h264_videotoolbox # macOS hardware encoder (NOT libx264 which is software)
+  bitrate: 8000k              # 8Mbps for high quality (hardware uses bitrate control)
 ```
 
 ### 2. People Detection Optimization
@@ -120,8 +120,9 @@ python main.py
 If issues occur, conservative defaults:
 ```yaml
 encoding:
-  use_hw_encode: false
-  x264_preset: veryfast
+  use_hw_encode: false          # Disable hardware encoding, use software fallback
+  hw_codec: h264_videotoolbox   # Still specify hardware codec (ignored when hw disabled)
+  x264_preset: veryfast         # Software fallback settings (libx264)
   x264_crf: '22'
 concurrency:
   validation_workers: 2

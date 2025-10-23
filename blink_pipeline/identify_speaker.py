@@ -1,5 +1,6 @@
 import logging
 import os
+import sys
 import shutil
 import tempfile
 from dataclasses import dataclass
@@ -7,18 +8,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from src.media_utils import extract_audio_segment
+from blink_pipeline.media_utils import extract_audio_segment
+from blink_pipeline.av_alignment import estimate_per_clip_offsets
 
-try:  # pragma: no cover - runtime validation
-    import torch
-except ImportError:  # pragma: no cover - runtime validation
-    torch = None
-
-try:  # pragma: no cover - runtime validation
-    from pyannote.audio import Inference, Model
-except ImportError:  # pragma: no cover - runtime validation
-    Inference = None
-    Model = None
+import torch
+from pyannote.audio import Inference, Model
 
 
 @dataclass
@@ -76,12 +70,31 @@ class SpeakerIdentifier:
 
         # Use whole-file embeddings for stable single-vector voiceprints
         self.embedding_model = Inference(model, window="whole")
-        # Place model on the requested device
+        # Place model on the requested device (CUDA > MPS > CPU)
         try:  # pragma: no cover - depends on runtime availability
-            if self.settings.device == "cuda":
-                self.embedding_model.to(torch.device("cuda"))
-        except Exception:  # silently fall back to CPU if CUDA unavailable
-            pass
+            if self.settings.device == "cuda" and torch is not None:
+                if torch.cuda.is_available():
+                    self.embedding_model.to(torch.device("cuda"))
+                    logging.info("SpeakerIdentifier using CUDA acceleration")
+                else:
+                    logging.warning("Requested CUDA device, but CUDA is not available. Falling back to CPU")
+            elif self.settings.device == "mps" and torch is not None:
+                # Prefer Apple Silicon MPS when available
+                if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                    self.embedding_model.to(torch.device("mps"))
+                    logging.info("SpeakerIdentifier using MPS acceleration (Apple Silicon)")
+                    # Improve matmul perf/precision on MPS if supported
+                    if hasattr(torch, "set_float32_matmul_precision"):
+                        torch.set_float32_matmul_precision("high")
+                else:
+                    logging.warning("Requested MPS device, but MPS is not available. Falling back to CPU")
+            else:
+                logging.info("SpeakerIdentifier using CPU")
+        except Exception:  # silently fall back to CPU if accel unavailable
+            logging.warning(
+                "Falling back to CPU for speaker embeddings due to device initialization error",
+                exc_info=True,
+            )
 
         self.voiceprints: Dict[str, np.ndarray] = {}
         self.label_aliases: Dict[str, str] = {}
@@ -165,11 +178,33 @@ class SpeakerIdentifier:
             )
 
         device = config.get("device", "auto")
+        prefer_mps_on_mac = bool(config.get("prefer_mps_on_mac", True))
         if device == "auto":
-            if torch is not None and torch.cuda.is_available():
+            # On macOS, optionally prefer MPS first when available
+            if (
+                prefer_mps_on_mac
+                and sys.platform == "darwin"
+                and torch is not None
+                and hasattr(torch.backends, "mps")
+                and torch.backends.mps.is_available()
+            ):
+                device = "mps"
+            elif torch is not None and torch.cuda.is_available():
                 device = "cuda"
+            elif (
+                torch is not None
+                and hasattr(torch.backends, "mps")
+                and torch.backends.mps.is_available()
+            ):
+                device = "mps"
             else:
                 device = "cpu"
+        logging.info(
+            "Speaker identification: selected device=%s (prefer_mps_on_mac=%s, platform=%s)",
+            device,
+            prefer_mps_on_mac,
+            sys.platform,
+        )
 
         similarity_threshold = float(config.get("similarity_threshold", 0.68))
 

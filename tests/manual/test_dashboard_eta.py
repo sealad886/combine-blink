@@ -5,7 +5,7 @@ This script runs slower to make ETA calculations visible during execution.
 """
 
 import time
-from src.pipeline_dashboard import PipelineDashboard
+from blink_pipeline.pipeline_dashboard import PipelineDashboard
 
 def main():
     """Test the pipeline dashboard with visible ETA calculations."""

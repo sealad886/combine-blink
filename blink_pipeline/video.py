@@ -3,7 +3,7 @@ import os
 import subprocess
 import tempfile
 from typing import List
-from src.media_utils import probe_media_info
+from blink_pipeline.media_utils import probe_media_info
 
 def _hw_encode_enabled() -> bool:
     return os.environ.get("CB_USE_HW", "1") == "1"
@@ -40,16 +40,26 @@ def merge_video_clips(video_paths: List[str], output_path: str, crossfade_durati
     return True
 
 def _copy_single_clip(source: str, destination: str) -> bool:
-    cmd = ["ffmpeg","-y","-nostdin","-hide_banner","-loglevel","error",
-           "-hwaccel","videotoolbox","-hwaccel_output_format","videotoolbox",
-           "-i", source]
-    if _hw_encode_enabled():
-        cmd += ["-c:v", _hw_codec(), "-realtime","true", "-c:a","aac", "-movflags","+faststart"]
+    # Prefer hardware-assisted remux/encode path if available and configured
+    use_hw = os.environ.get("CB_USE_HW", "1") == "1"
+    hw_codec = os.environ.get("CB_HW_CODEC", "h264_videotoolbox")
+    command = [
+        "ffmpeg",
+        "-y",
+        "-nostdin", "-hide_banner", "-loglevel", "error",
+        "-hwaccel", "videotoolbox", "-hwaccel_output_format", "videotoolbox",
+        "-i",
+        source,
+    ]
+    if use_hw:
+        command += ["-c:v", hw_codec, "-realtime", "true", "-c:a", "aac", "-movflags", "+faststart"]
     else:
-        cmd += ["-c","copy"]
-    cmd += [destination]
-    r = subprocess.run(cmd)
-    if r.returncode != 0:
+        command += ["-c", "copy"]
+    command += [
+        destination,
+    ]
+    result = subprocess.run(command)
+    if result.returncode != 0:
         logging.error("ffmpeg failed to duplicate %s", source)
         return False
     return True
@@ -63,24 +73,40 @@ def _crossfade_pair(first_clip: str, second_clip: str, output_path: str, duratio
 
     offset = max(fi.duration - duration, 0.0)
     filter_complex = (
-        f"[0:v]setpts=PTS-STARTPTS,format=yuv420p,setsar=1[v0];"
-        f"[1:v]setpts=PTS-STARTPTS,format=yuv420p,setsar=1[v1];"
+        f"[0:v]setpts=PTS-STARTPTS[v0];"
+        f"[1:v]setpts=PTS-STARTPTS[v1];"
         f"[0:a]asetpts=PTS-STARTPTS[a0];"
         f"[1:a]asetpts=PTS-STARTPTS[a1];"
         f"[v0][v1]xfade=transition=fade:duration={duration}:offset={offset}[vout];"
         f"[a0][a1]acrossfade=d={duration}[aout]"
     )
-    cmd = ["ffmpeg","-y","-nostdin","-hide_banner","-loglevel","error",
-           "-i", first_clip, "-i", second_clip,
-           "-filter_complex", filter_complex,
-           "-map","[vout]","-map","[aout]"]
-    if _hw_encode_enabled():
-        cmd += ["-c:v", _hw_codec(), "-realtime","true","-c:a","aac","-movflags","+faststart"]
+
+    use_hw = os.environ.get("CB_USE_HW", "1") == "1"
+    hw_codec = os.environ.get("CB_HW_CODEC", "h264_videotoolbox")
+    command = [
+        "ffmpeg",
+        "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
+        "-i",
+        first_clip,
+        "-i",
+        second_clip,
+        "-filter_complex",
+        filter_complex,
+        "-map",
+        "[vout]",
+        "-map",
+        "[aout]",
+    ]
+    if use_hw:
+        command += ["-c:v", hw_codec, "-realtime", "true", "-c:a", "aac", "-movflags", "+faststart"]
     else:
-        cmd += ["-c:v","libx264","-c:a","aac","-movflags","+faststart"]
-    cmd += [output_path]
-    r = subprocess.run(cmd)
-    if r.returncode != 0:
+        command += ["-c:v", "libx264", "-c:a", "aac", "-movflags", "+faststart"]
+    command += [
+        output_path,
+    ]
+
+    result = subprocess.run(command)
+    if result.returncode != 0:
         logging.error("ffmpeg crossfade failed for %s and %s", first_clip, second_clip)
         return False
     return True
@@ -90,6 +116,9 @@ def _concat_pair(first_clip: str, second_clip: str, output_path: str) -> bool:
     fi = probe_media_info(first_clip)
     si = probe_media_info(second_clip)
     both_have_audio = bool(fi.has_audio and si.has_audio)
+
+    use_hw = os.environ.get("CB_USE_HW", "1") == "1"
+    hw_codec = os.environ.get("CB_HW_CODEC", "h264_videotoolbox")
 
     if both_have_audio:
         filter_complex = (
@@ -103,8 +132,8 @@ def _concat_pair(first_clip: str, second_clip: str, output_path: str) -> bool:
                "-i", first_clip, "-i", second_clip,
                "-filter_complex", filter_complex,
                "-map","[v]","-map","[a]"]
-        if _hw_encode_enabled():
-            cmd += ["-c:v", _hw_codec(), "-realtime","true","-c:a","aac","-movflags","+faststart", output_path]
+        if use_hw:
+            cmd += ["-c:v", hw_codec, "-realtime","true","-c:a","aac","-movflags","+faststart", output_path]
         else:
             cmd += ["-c:v","libx264","-c:a","aac","-movflags","+faststart", output_path]
         r = subprocess.run(cmd)
@@ -118,8 +147,8 @@ def _concat_pair(first_clip: str, second_clip: str, output_path: str) -> bool:
            "-i", first_clip, "-i", second_clip,
            "-filter_complex","[0:v]setpts=PTS-STARTPTS,format=yuv420p,setsar=1[v0];[1:v]setpts=PTS-STARTPTS,format=yuv420p,setsar=1[v1];[v0][v1]concat=n=2:v=1:a=0[v]",
            "-map","[v]"]
-    if _hw_encode_enabled():
-        cmd += ["-c:v", _hw_codec(), "-realtime","true","-movflags","+faststart"]
+    if use_hw:
+        cmd += ["-c:v", hw_codec, "-realtime","true","-movflags","+faststart"]
     else:
         cmd += ["-c:v","libx264","-movflags","+faststart"]
     cmd += [output_path]

@@ -1,5 +1,5 @@
 import os
-from src.media_utils import repair_video, probe_media_info
+from blink_pipeline.media_utils import repair_video, probe_media_info
 import logging
 
 logging.basicConfig(level=logging.INFO)

@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "combine-blink"
+version = "0.1.0"
+authors = [{ name = "Dr Andrew Cox", email = "dev@andrewcox.doctor" }]
+license = {text = "Apache-2.0"}
+description = "Modular Blink security camera video processing pipeline."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "ffmpeg",
+    "PyYAML>=6.0",
+    "moviepy>1.0",
+    "demucs",
+    "pyannote.audio>=3.1",
+    "openai-whisper",
+    "numpy>=1.23,<2.2",
+    "rich>=13.0",
+    "Pillow>=9.4.0",
+    "transformers>=4.43.0",
+    "torch<2.9.0",
+    "torchaudio<2.9.0",
+    "torchcodec>=0.7.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.1",
+    "ruff>=0.6",
+    "mypy>=1.10",
+]
+vision = [
+    "pyobjc-core>=9.2",
+    "pyobjc-framework-Vision>=9.2",
+    "pyobjc-framework-Quartz>=9.2",
+]
+
+[project.scripts]
+combine-blink = "blink_pipeline.orchestrator:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["blink_pipeline*"]
+exclude = ["tests*", "docs*", "logs*", "output*", "whisper.cpp*", "25-10-15*"]
+
+[tool.setuptools]
+include-package-data = false

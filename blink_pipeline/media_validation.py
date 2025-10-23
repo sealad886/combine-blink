@@ -14,7 +14,6 @@ Key principles:
 
 import logging
 import os
-import hashlib
 import json
 import tempfile
 from datetime import datetime
@@ -22,7 +21,12 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Callable
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-from src.media_utils import MediaInfo, probe_media_info, repair_video
+from blink_pipeline.media_utils import (
+    probe_media_info,
+    repair_video,
+    build_repair_cache_path,
+    legacy_repair_cache_path,
+)
 
 
 def _init_worker():
@@ -122,15 +126,12 @@ def _get_cache_path(video_path: str, cache_dir: str, strategy: str) -> Path:
     Returns:
         Path object for the cache file
     """
-    # Use hash of full path to avoid collisions
-    path_hash = hashlib.md5(video_path.encode()).hexdigest()[:8]
-    filename = f"repaired_{strategy}_{Path(video_path).stem}_{path_hash}.mp4"
-    return Path(cache_dir) / filename
+    return build_repair_cache_path(video_path, cache_dir, strategy)
 
 
 def _get_cache_path_legacy(video_path: str, cache_dir: str, strategy: str) -> Path:
     """Legacy cache path format for backward compatibility."""
-    return Path(cache_dir) / f"repaired_{strategy}_{Path(video_path).name}"
+    return legacy_repair_cache_path(video_path, cache_dir, strategy)
 
 
 def _validate_video_job(args: Tuple[str, str, str, bool]) -> Tuple[str, str, str]:

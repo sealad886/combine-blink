@@ -18,7 +18,7 @@ from pathlib import Path
 # Add parent directory to path to import src module
 sys.path.insert(0, os.path.dirname(__file__))
 
-from src.media_validation import preprocess_videos, _get_cache_path, _get_cache_path_legacy
+from blink_pipeline.media_validation import preprocess_videos, _get_cache_path, _get_cache_path_legacy
 
 
 def test_cache_key_collision_prevention():
@@ -100,7 +100,7 @@ def test_statistics_tracking():
     # This is more of a code inspection test since we can't easily
     # run full preprocessing without valid video files
 
-    from src.media_validation import _validate_video_job
+    from blink_pipeline.media_validation import _validate_video_job
 
     print("Checking return type of _validate_video_job:")
     print("  Expected: Tuple[str, str, str] with status in ('cached', 'repaired', 'original')")

@@ -5,7 +5,7 @@ This script simulates the pipeline stages to verify the dashboard display works 
 """
 
 import time
-from src.pipeline_dashboard import PipelineDashboard
+from blink_pipeline.pipeline_dashboard import PipelineDashboard
 
 def main():
     """Test the pipeline dashboard with simulated work."""

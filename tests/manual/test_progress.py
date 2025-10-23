@@ -4,7 +4,7 @@
 import time
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
-from src.progress import ProgressTracker
+from blink_pipeline.progress import ProgressTracker
 
 
 def simulate_work(args):

@@ -1,6 +1,8 @@
+import hashlib
 import json
 import logging
 import os
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +17,18 @@ class MediaInfo:
     has_audio: bool = False
     video_duration: float = 0.0
     audio_duration: float = 0.0
+
+
+def build_repair_cache_path(video_path: str, cache_dir: str, strategy: str) -> Path:
+    """Return canonical cache path for a repaired video."""
+    path_hash = hashlib.md5(video_path.encode("utf-8")).hexdigest()[:8]
+    filename = f"repaired_{strategy}_{Path(video_path).stem}_{path_hash}.mp4"
+    return Path(cache_dir) / filename
+
+
+def legacy_repair_cache_path(video_path: str, cache_dir: str, strategy: str) -> Path:
+    """Return legacy cache path (without hashed suffix)."""
+    return Path(cache_dir) / f"repaired_{strategy}_{Path(video_path).name}"
 
 
 def probe_media_info(path: str) -> MediaInfo:
@@ -85,16 +99,39 @@ def repair_video(video_path: str, output_path: str, cache_dir: Optional[str] = N
     Returns:
         True if repair successful, False otherwise
     """
+    cache_path: Optional[Path] = None
+    legacy_cache_path: Optional[Path] = None
+
     # Check if already repaired (cached) and always use it if present
     if cache_dir:
-        cache_path = Path(cache_dir) / f"repaired_{strategy}_{Path(video_path).name}"
+        cache_path = build_repair_cache_path(video_path, cache_dir, strategy)
+        legacy_cache_path = legacy_repair_cache_path(video_path, cache_dir, strategy)
+
+        existing_cache: Optional[Path] = None
         if cache_path.exists():
-            logging.info(f"Using cached repaired video: {cache_path}")
-            # Always copy to output_path if needed
-            if str(cache_path) != output_path:
-                import shutil
+            existing_cache = cache_path
+        elif legacy_cache_path.exists():
+            try:
+                legacy_cache_path.rename(cache_path)
+                existing_cache = cache_path
+                logging.info(f"Migrated legacy cache file to {cache_path.name}")
+            except OSError as exc:
+                logging.warning(f"Legacy cache migration failed: {exc}")
                 try:
-                    shutil.copy2(cache_path, output_path)
+                    shutil.copy2(legacy_cache_path, cache_path)
+                    if legacy_cache_path.exists():
+                        legacy_cache_path.unlink()
+                    existing_cache = cache_path
+                    logging.info(f"Copied legacy cache file to {cache_path.name}")
+                except Exception as copy_exc:
+                    logging.warning(f"Legacy cache copy failed: {copy_exc}")
+                    existing_cache = legacy_cache_path
+
+        if existing_cache:
+            logging.info(f"Using cached repaired video: {existing_cache}")
+            if str(existing_cache) != output_path:
+                try:
+                    shutil.copy2(existing_cache, output_path)
                 except Exception as exc:
                     logging.error(f"Failed to copy cached repaired video: {exc}")
                     return False
@@ -175,11 +212,15 @@ def repair_video(video_path: str, output_path: str, cache_dir: Optional[str] = N
             return False
 
         # Cache the repaired video if cache_dir provided
-        if cache_dir and output_path != str(Path(cache_dir) / f"repaired_{strategy}_{Path(video_path).name}"):
-            cache_path = Path(cache_dir) / f"repaired_{strategy}_{Path(video_path).name}"
+        if cache_dir and cache_path is not None:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
-            import shutil
-            shutil.copy2(output_path, cache_path)
+            if Path(output_path) != cache_path:
+                shutil.copy2(output_path, cache_path)
+            if legacy_cache_path and legacy_cache_path.exists() and legacy_cache_path != cache_path:
+                try:
+                    legacy_cache_path.unlink()
+                except Exception:
+                    pass
 
         logging.info(f"✓ Video repaired successfully (strategy: {strategy})")
         return True

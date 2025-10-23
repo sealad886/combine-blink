@@ -8,7 +8,7 @@ not when the substage is added to the queue.
 """
 
 import time
-from src.pipeline_dashboard import PipelineDashboard
+from blink_pipeline.pipeline_dashboard import PipelineDashboard
 
 def simulate_queued_processing():
     """Simulate concurrent processing where substages queue up."""

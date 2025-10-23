@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Tuple, Optional
 import numpy as np
-from src.audio_cache import ensure_wav_cache, load_wav_segment
+from blink_pipeline.audio_cache import ensure_wav_cache, load_wav_segment
 
 @dataclass
 class ClipLike:
@@ -94,3 +94,58 @@ def estimate_offsets_and_drift(camera_clips: Iterable[ClipLike],
         offsets[clip.camera] = median_offset
         drifts[clip.camera] = 0.0  # keep simple; drift fitting optional
     return offsets, drifts
+
+def estimate_per_clip_offsets(
+    clips: List[ClipLike],
+    ref_camera: str,
+    *,
+    sample_rate: int = 16000,
+    window_seconds: float = 12.0,
+    hop_seconds: float = 6.0,
+    bandpass: bool = True,
+    hp: int = 300,
+    lp: int = 3000,
+    max_shift_seconds: float = 1.0,
+) -> Dict[str, float]:
+    """
+    Estimate time offsets for clips from different cameras relative to a reference camera.
+
+    This is a simplified interface to estimate_offsets_and_drift that returns only offsets
+    (not drift estimates) as a dict mapping camera name to offset in seconds.
+
+    Args:
+        clips: List of ClipLike objects with path, camera, start_time, duration attributes
+        ref_camera: Camera name to use as the reference (offset = 0.0)
+        sample_rate: Audio sample rate for analysis (default: 16000 Hz)
+        window_seconds: Duration of audio window to analyze (default: 12.0 seconds)
+        hop_seconds: Hop size for multi-window analysis (default: 6.0 seconds)
+        bandpass: Whether to apply bandpass filter to audio (default: True)
+        hp: Highpass filter cutoff frequency in Hz (default: 300 Hz)
+        lp: Lowpass filter cutoff frequency in Hz (default: 3000 Hz)
+        max_shift_seconds: Maximum allowed time shift in seconds (default: 1.0 seconds)
+
+    Returns:
+        Dictionary mapping camera name to offset in seconds. Positive offset means the
+        camera starts AFTER the reference camera (lags behind). The reference camera
+        will have offset 0.0.
+
+    Example:
+        >>> clips = [ClipLike(path='cam1.mp4', camera='cam1', start_time=0, duration=10),
+        ...          ClipLike(path='cam2.mp4', camera='cam2', start_time=0.5, duration=10)]
+        >>> offsets = estimate_per_clip_offsets(clips, ref_camera='cam1')
+        >>> # offsets['cam1'] == 0.0 (reference)
+        >>> # offsets['cam2'] might be ~0.5 (cam2 lags behind cam1)
+    """
+    offsets, _ = estimate_offsets_and_drift(
+        clips,
+        ref_camera,
+        sample_rate=sample_rate,
+        window_seconds=window_seconds,
+        hop_seconds=hop_seconds,
+        bandpass=bandpass,
+        hp=hp,
+        lp=lp,
+        max_shift_seconds=max_shift_seconds,
+        estimate_drift=False,
+    )
+    return offsets

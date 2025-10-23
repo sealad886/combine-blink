@@ -1,31 +1,19 @@
 import logging
 import os
+import sys
 import tempfile
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional
 
-# Optional heavy dependencies: make imports resilient so utility functions
-# and tests that don't require these libs can still run in lightweight envs.
-try:  # torch is used to pick device when device=="auto"; optional for tests
-    import torch  # type: ignore
-except Exception:  # pragma: no cover - absence is acceptable for non-ML paths/tests
-    torch = None  # type: ignore
+import torch  # type: ignore
+import whisper  # type: ignore
 
-try:  # openai-whisper backend; optional if using whisper.cpp or for unit tests
-    import whisper  # type: ignore
-except Exception:  # pragma: no cover
-    whisper = None  # type: ignore
+from pyannote.audio import Pipeline  # type: ignore
+from pyannote.core import Annotation  # type: ignore
+from pyannote.core import Segment  # type: ignore
 
-try:  # diarization backend; optional for unit tests that don't run diarization
-    from pyannote.audio import Pipeline  # type: ignore
-    from pyannote.core import Annotation  # type: ignore
-    from pyannote.core import Segment  # type: ignore
-except Exception:  # pragma: no cover
-    Pipeline = None  # type: ignore
-    Annotation = None  # type: ignore
-    Segment = None  # type: ignore
-from src.media_utils import MediaInfo, extract_audio_segment, probe_media_info
-from src.whisper_cpp_wrapper import WhisperCppWrapper, is_ggml_model
+from blink_pipeline.media_utils import MediaInfo, extract_audio_segment, probe_media_info
+from blink_pipeline.whisper_cpp_wrapper import WhisperCppWrapper, is_ggml_model
 
 
 @dataclass
@@ -58,10 +46,9 @@ def process_audio_for_transcription(
         progress_callback: Optional callable(completed_count: int) to report progress
     """
 
-    if whisper is None:
-        raise RuntimeError(
-            "openai-whisper is not installed. Install it via 'pip install openai-whisper' to enable transcription."
-        )
+    # Choose backend: prefer whisper.cpp on Apple Silicon when configured/available
+    prefer_cpp = (config.get("transcription", {}).get("whisper", {}).get("prefer_whisper_cpp", True)
+                  and (sys.platform == "darwin"))
 
     if Pipeline is None or Segment is None:
         raise RuntimeError(
@@ -76,8 +63,22 @@ def process_audio_for_transcription(
     whisper_settings = _parse_whisper_settings(transcription_config.get("whisper", {}))
     diarization_settings = _parse_diarization_settings(transcription_config.get("diarization", {}))
 
-    transcriber = _WhisperTranscriber(whisper_settings)
-    diarizer = _PyannoteDiarizer(diarization_settings)
+    transcriber: _WhisperCppAdapter | _WhisperTranscriber
+    if prefer_cpp and whisper_settings.ggml_model_path:
+        logging.info("Using whisper.cpp directly (preferred on macOS)")
+        cpp_wrapper = WhisperCppWrapper(
+            model_path=whisper_settings.ggml_model_path,
+            whisper_cpp_binary=whisper_settings.whisper_cpp_binary or "whisper-cli",
+            device=whisper_settings.device,
+            compute_type=whisper_settings.compute_type
+        )
+        # Create adapter with transcribe_file() method
+        transcriber = _WhisperCppAdapter(cpp_wrapper, whisper_settings)
+    else:
+        if whisper is None:
+            raise RuntimeError("Whisper (PyTorch) not installed and whisper.cpp not configured.")
+        transcriber = _WhisperTranscriber(whisper_settings)
+    diarizer: _PyannoteDiarizer = _PyannoteDiarizer(diarization_settings)
 
     logging.info("Processing %d clips sequentially for transcription", len(video_paths))
 
@@ -235,6 +236,48 @@ def _parse_diarization_settings(config: Dict[str, Any]) -> DiarizationSettings:
     )
 
 
+class _WhisperCppAdapter:
+    """Adapter to make WhisperCppWrapper compatible with _WhisperTranscriber interface."""
+
+    def __init__(self, cpp_wrapper: WhisperCppWrapper, settings: WhisperSettings) -> None:
+        self.cpp_wrapper = cpp_wrapper
+        self.settings = settings
+
+    def transcribe_file(self, audio_path: str) -> List[Dict[str, Any]]:
+        """Transcribe audio file using whisper.cpp and return segments."""
+        result = self.cpp_wrapper.transcribe(
+            audio_path,
+            language=self.settings.language,
+            task="transcribe",
+        )
+
+        segments = []
+        for seg in result.get("segments", []):
+            text = seg.get("text", "").strip()
+            if not text:
+                continue
+
+            # Handle different timestamp formats
+            start = seg.get("start", 0.0)
+            end = seg.get("end", 0.0)
+
+            # Convert timestamp strings to floats if needed
+            if isinstance(start, str):
+                try:
+                    start = float(start.replace("s", "").strip())
+                except (ValueError, AttributeError):
+                    start = 0.0
+            if isinstance(end, str):
+                try:
+                    end = float(end.replace("s", "").strip())
+                except (ValueError, AttributeError):
+                    end = 0.0
+
+            segments.append({"start": float(start), "end": float(end), "text": text})
+
+        return segments
+
+
 class _WhisperTranscriber:
     """Thin wrapper around openai-whisper or whisper.cpp with sensible defaults."""
 
@@ -342,7 +385,6 @@ class _WhisperTranscriber:
 
 class _PyannoteDiarizer:
     """Wrapper around pyannote speaker diarization Pipeline."""
-
     def __init__(self, settings: DiarizationSettings) -> None:
         if Pipeline is None:
             raise RuntimeError(
@@ -351,7 +393,7 @@ class _PyannoteDiarizer:
         self.settings = settings
         logging.info("Loading pyannote pipeline '%s'", settings.model_id)
         # Avoid strict typing here so module can import without pyannote installed in test envs
-        self.pipeline = Pipeline.from_pretrained(settings.model_id, token=settings.auth_token)
+        self.pipeline: Pipeline = Pipeline.from_pretrained(settings.model_id, token=settings.auth_token)
 
     def diarize_file(self, audio_path: str) -> Any:
         """Run diarization and return Annotation object."""
@@ -359,9 +401,9 @@ class _PyannoteDiarizer:
             raise RuntimeError(
                 "pyannote.audio Pipeline is not initialized. Ensure dependencies are installed."
             )
-        diarization_output = self.pipeline(audio_path)
-        # Extract the Annotation from DiarizeOutput
-        return diarization_output.speaker_diarization
+        # In pyannote 3.x, pipeline() returns Annotation directly
+        diarization_output: Annotation = self.pipeline(audio_path)
+        return diarization_output
 
 
 def _assign_speakers(

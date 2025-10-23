@@ -18,7 +18,7 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from src.logging_config import PipelineLogger, configure_worker_logging
+from blink_pipeline.logging_config import PipelineLogger, configure_worker_logging
 
 def test_basic_logging():
     """Test basic logging functionality."""

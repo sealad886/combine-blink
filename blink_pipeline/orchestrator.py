@@ -1,4 +1,5 @@
 import os
+import json
 import sys
 import yaml
 import logging
@@ -86,6 +87,101 @@ def _generate_group_name(group: List[Dict[str, Any]]) -> str:
         return f"{timestamp_str}_{camera_str}"
 
 
+def _get_profiles_path(config: Dict[str, Any]) -> str:
+    """Return path to the editable speaker profiles JSON."""
+    output_dir = config['paths']['output_dir']
+    speakers_dir = os.path.join(output_dir, config['paths']['speakers_dir'])
+    os.makedirs(speakers_dir, exist_ok=True)
+    return os.path.join(speakers_dir, 'profiles.json')
+
+
+def _load_profile_name_map(config: Dict[str, Any]) -> Dict[str, str]:
+    """Load a mapping of speaker_id -> friendly name from profiles.json if present."""
+    path = _get_profiles_path(config)
+    names: Dict[str, str] = {}
+    try:
+        if os.path.exists(path):
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f) or {}
+            speakers = (data.get('speakers') or {})
+            for sid, meta in speakers.items():
+                nm = (meta or {}).get('name')
+                if isinstance(nm, str) and nm.strip():
+                    names[sid] = nm.strip()
+    except Exception:
+        # Non-fatal; proceed without names
+        pass
+    # Merge with config-known names (config takes precedence)
+    cfg_names = ((config.get('speakers') or {}).get('known_speakers') or {})
+    if isinstance(cfg_names, dict):
+        names.update({k: v for k, v in cfg_names.items() if isinstance(v, str) and v.strip()})
+    return names
+
+
+def _write_speaker_profiles(config: Dict[str, Any]) -> Tuple[int, str]:
+    """Create/update speakers/profiles.json summarizing discovered speakers and samples.
+
+    Returns (count, path)
+    """
+    output_dir = config['paths']['output_dir']
+    speakers_dir = os.path.join(output_dir, config['paths']['speakers_dir'])
+    os.makedirs(speakers_dir, exist_ok=True)
+    profiles_path = _get_profiles_path(config)
+
+    # Gather samples by speaker id
+    samples_by_id: Dict[str, List[str]] = {}
+    for entry in os.listdir(speakers_dir):
+        if not entry.lower().endswith('.wav'):
+            continue
+        sid = os.path.splitext(entry)[0]
+        samples_by_id.setdefault(sid, []).append(entry)
+
+    # Load existing names if any
+    existing_names: Dict[str, str] = {}
+    try:
+        if os.path.exists(profiles_path):
+            with open(profiles_path, 'r', encoding='utf-8') as f:
+                payload = json.load(f) or {}
+            for sid, meta in (payload.get('speakers') or {}).items():
+                nm = (meta or {}).get('name')
+                if isinstance(nm, str) and nm.strip():
+                    existing_names[sid] = nm.strip()
+    except Exception:
+        existing_names = {}
+
+    # Merge config-known names
+    cfg_names = ((config.get('speakers') or {}).get('known_speakers') or {})
+    if isinstance(cfg_names, dict):
+        for k, v in cfg_names.items():
+            if isinstance(v, str) and v.strip():
+                existing_names[k] = v.strip()
+
+    # Build document
+    speakers_doc: Dict[str, Any] = {}
+    for sid, files in sorted(samples_by_id.items()):
+        speakers_doc[sid] = {
+            "name": existing_names.get(sid),
+            "samples": sorted(files),
+            "notes": "Edit 'name' with a friendly label. Names here are used in final transcripts.",
+        }
+
+    doc = {
+        "version": 1,
+        "generated_at": datetime.now().isoformat(timespec='seconds'),
+        "speakers": speakers_doc,
+    }
+
+    # Write atomically
+    try:
+        tmp_path = profiles_path + ".tmp"
+        with open(tmp_path, 'w', encoding='utf-8') as f:
+            json.dump(doc, f, indent=2)
+        os.replace(tmp_path, profiles_path)
+    except Exception as exc:
+        logging.getLogger("pipeline").warning("Failed to write profiles.json: %s", exc)
+    return len(speakers_doc), profiles_path
+
+
 def _transcribe_group_job(args: Tuple[str, List[str], Dict[str, Any], Any, Any]) -> Tuple[str, List[str], Optional[Dict[str, Any]]]:
     """Worker: run Stage 3 for a single group and return processed paths and diarization.
 
@@ -100,6 +196,31 @@ def _transcribe_group_job(args: Tuple[str, List[str], Dict[str, Any], Any, Any])
     configure_worker_logging(log_dir)
 
     logger = logging.getLogger("pipeline.transcription")
+
+    # Check for cached diarization result
+    output_dir = config['paths']['output_dir']
+    cache_dir = os.path.join(output_dir, '.diarization_cache')
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_file = os.path.join(cache_dir, f"{group_name}_diarization.json")
+
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file, 'r', encoding='utf-8') as f:
+                cached_data = json.load(f)
+            logger.info(f"Using cached diarization for group: {group_name}")
+
+            # Extract processed paths and diarization result
+            processed_video_paths = cached_data.get('processed_paths', video_paths)
+            diarization_result = cached_data.get('diarization_result')
+
+            # Mark progress as complete immediately
+            total_clips = len(video_paths)
+            progress_dict[task_id] = {"progress": total_clips, "total": total_clips, "visible": False}
+
+            return group_name, processed_video_paths, diarization_result
+        except Exception as e:
+            logger.warning(f"Failed to load cached diarization for {group_name}: {e}, re-processing")
+
     logger.info(f"Starting transcription for group: {group_name} ({len(video_paths)} clips)")
 
     # Initialize progress with actual number of clips to process
@@ -130,6 +251,20 @@ def _transcribe_group_job(args: Tuple[str, List[str], Dict[str, Any], Any, Any])
 
     # Mark as complete
     progress_dict[task_id] = {"progress": total_clips, "total": total_clips, "visible": False}
+
+    # Cache the diarization result for future runs
+    try:
+        cache_data = {
+            'group_name': group_name,
+            'processed_paths': processed_video_paths,
+            'diarization_result': diarization_result,
+            'timestamp': datetime.now().isoformat()
+        }
+        with open(cache_file, 'w', encoding='utf-8') as f:
+            json.dump(cache_data, f, indent=2)
+        logger.info(f"Cached diarization result for group: {group_name}")
+    except Exception as e:
+        logger.warning(f"Failed to cache diarization for {group_name}: {e}")
 
     return group_name, processed_video_paths, diarization_result
 
@@ -228,6 +363,116 @@ def main():
     # Set up comprehensive file-based logging
     pipeline_logger = setup_pipeline_logging(config)
     logger = pipeline_logger.get_logger()
+
+    # Optional standalone modes
+    if len(sys.argv) > 1:
+        mode = sys.argv[1].strip().lower()
+        if mode in {"final-transcribe-only", "build-speaker-profiles-only"}:
+            # Minimal dashboard context
+            output_dir = config['paths']['output_dir']
+            group_outputs_dir = os.path.join(output_dir, config['paths']['videos_dir'])
+            transcripts_dir = os.path.join(output_dir, config['paths']['transcripts_dir'])
+            transcripts_final_dir = os.path.join(transcripts_dir, 'final')
+            os.makedirs(transcripts_final_dir, exist_ok=True)
+
+            # Set up comprehensive file-based logging
+            pipeline_logger = setup_pipeline_logging(config)
+            logger = pipeline_logger.get_logger()
+
+            if mode == "final-transcribe-only":
+                merged = []
+                if os.path.exists(group_outputs_dir):
+                    for f in os.listdir(group_outputs_dir):
+                        if f.endswith("_merged.mp4"):
+                            gname = f[:-len("_merged.mp4")]
+                            merged.append((gname, os.path.join(group_outputs_dir, f)))
+                dashboard = PipelineDashboard(total_videos=0, total_groups=len(merged), total_clips=0)
+                with dashboard:
+                    dashboard.start_stage('final_transcription', len(merged))
+                    # Prepare SpeakerIdentifier and merge in profile names
+                    try:
+                        speaker_identifier = SpeakerIdentifier(config)
+                        name_map = _load_profile_name_map(config)
+                        if name_map:
+                            speaker_identifier.known_speakers_map.update(name_map)
+                    except Exception as exc:
+                        speaker_identifier = None
+                        logger.warning("SpeakerIdentifier unavailable; proceeding without naming: %s", exc)
+
+                    completed = 0
+                    for group_name, video_path in merged:
+                        final_txt = os.path.join(transcripts_final_dir, f"{group_name}_final_transcript.txt")
+                        if os.path.exists(final_txt):
+                            completed += 1
+                            dashboard.update_stage('final_transcription', completed, f"Skip (exists): {group_name}")
+                            continue
+                        diarization_result = None
+                        try:
+                            diarization_result = process_audio_for_transcription([video_path], config)
+                        except Exception as exc:
+                            logger.warning("Final transcription diarization failed for %s: %s", group_name, exc)
+
+                        lines: List[str] = []
+                        if diarization_result and diarization_result.get('segments'):
+                            # Optionally resolve and substitute names
+                            if speaker_identifier is not None:
+                                try:
+                                    speaker_identifier.process_transcript(
+                                        diarization_result['segments'], diarization_result.get('timeline', [])
+                                    )
+                                    final_segments = speaker_identifier.substitute_names_in_transcript(
+                                        diarization_result['segments']
+                                    )
+                                except Exception as exc:
+                                    logger.warning("Speaker resolution failed for %s: %s", group_name, exc)
+                                    final_segments = diarization_result['segments']
+                            else:
+                                final_segments = diarization_result['segments']
+                            for entry in final_segments:
+                                spk = entry.get('speaker', 'Unknown')
+                                text = entry.get('text', '')
+                                lines.append(f"{spk}: {text}")
+                        else:
+                            # Fallback: plain whisper.cpp transcription without diarization
+                            try:
+                                from blink_pipeline.media_utils import extract_audio_segment
+                                from blink_pipeline.whisper_cpp_wrapper import WhisperCppWrapper
+                                whisper_cfg = (config.get('transcription') or {}).get('whisper', {})
+                                ggml = whisper_cfg.get('ggml_model_path')
+                                binary = whisper_cfg.get('whisper_cpp_binary')
+                                device = whisper_cfg.get('device', 'auto')
+                                import tempfile
+                                with tempfile.NamedTemporaryFile(suffix='.wav', delete=True) as tmp:
+                                    if not extract_audio_segment(video_path, tmp.name):
+                                        raise RuntimeError("Audio extraction failed")
+                                    wrapper = WhisperCppWrapper(model_path=ggml, whisper_cpp_binary=binary, device=device)
+                                    res = wrapper.transcribe(tmp.name, language=whisper_cfg.get('language'))
+                                    text = (res or {}).get('text') or ''
+                                    if text:
+                                        lines.append(text)
+                            except Exception as exc:
+                                logger.error("Plain transcription failed for %s: %s", group_name, exc)
+                                lines.append("<transcription unavailable>")
+
+                        with open(final_txt, 'w', encoding='utf-8') as fh:
+                            fh.write("\n".join(lines) + ("\n" if lines else ""))
+                        completed += 1
+                        dashboard.update_stage('final_transcription', completed, f"Done: {group_name}")
+                    dashboard.complete_stage('final_transcription', f"{completed} groups transcribed")
+                print(f"\nFinal transcripts saved to: {transcripts_final_dir}\n")
+                pipeline_logger.log_session_end(success=True)
+                return
+
+            if mode == "build-speaker-profiles-only":
+                dashboard = PipelineDashboard(total_videos=0, total_groups=0, total_clips=0)
+                with dashboard:
+                    dashboard.start_stage('speaker_profiles', 1)
+                    count, path = _write_speaker_profiles(config)
+                    dashboard.update_stage('speaker_profiles', 1, f"{count} speakers")
+                    dashboard.complete_stage('speaker_profiles', f"Profiles at {path}")
+                print(f"\nSpeaker profiles: {path}\n")
+                pipeline_logger.log_session_end(success=True)
+                return
 
     # --- STAGE 1: File Discovery ---
     print(f"\n{'='*80}")
@@ -385,28 +630,20 @@ def main():
         stage3_results: Dict[str, Tuple[List[str], Optional[Dict[str, Any]]]] = {}
         completed_count = 0
 
-        # Check for existing transcripts to enable resume functionality
-        existing_transcripts = set()
-        if os.path.exists(transcripts_dir):
-            existing_transcripts = {f.replace('_transcript.txt', '') for f in os.listdir(transcripts_dir) if f.endswith('_transcript.txt')}
+        # Check for existing cached diarization results
+        cache_dir = os.path.join(config['paths']['output_dir'], '.diarization_cache')
+        cached_groups = set()
+        if os.path.exists(cache_dir):
+            cached_groups = {f.replace('_diarization.json', '') for f in os.listdir(cache_dir) if f.endswith('_diarization.json')}
 
-        if existing_transcripts:
-            logger.info(f"Resuming: {len(existing_transcripts)} groups already transcribed")
+        if cached_groups:
+            logger.info(f"Found {len(cached_groups)} cached diarization results")
 
-        # Filter out groups that already have transcripts
-        jobs_to_process = []
-        for job in group_jobs:
-            group_name = job[0]
-            if group_name in existing_transcripts:
-                # For skipped groups, we still need processed paths for Stage 5
-                video_paths = job[1]
-                stage3_results[group_name] = (video_paths, None)
-                completed_count += 1
-            else:
-                jobs_to_process.append(job)
+        # All groups will be processed (cache check happens in worker)
+        jobs_to_process = group_jobs
 
-        if len(existing_transcripts) > 0:
-            dashboard.stages['transcription'].details = f"Resuming: {len(existing_transcripts)} already complete"
+        if cached_groups:
+            dashboard.stages['transcription'].details = f"Found {len(cached_groups)} cached results"
 
         dashboard.start_stage('transcription', len(group_jobs))
 
@@ -625,6 +862,181 @@ def main():
                 pipeline_logger.log_stage_end("Video Merging/Composition", 5, success=False,
                                             details="Interrupted by user")
                 raise
+
+        # --- STAGE 6: Final Transcription of Merged Videos (whisper.cpp) ---
+        # Discover merged videos (including those that already existed)
+        merged_videos: List[Tuple[str, str]] = []
+        if os.path.exists(group_outputs_dir):
+            for f in os.listdir(group_outputs_dir):
+                if f.endswith('_merged.mp4'):
+                    gname = f[:-len('_merged.mp4')]
+                    merged_videos.append((gname, os.path.join(group_outputs_dir, f)))
+
+        transcripts_final_dir = os.path.join(transcripts_dir, 'final')
+        os.makedirs(transcripts_final_dir, exist_ok=True)
+
+        pipeline_logger.log_stage_start("Final Video Transcription", 6,
+                                       f"{len(merged_videos)} merged videos")
+
+        dashboard.start_stage('final_transcription', len(merged_videos))
+
+        # Prepare SpeakerIdentifier and merge in profile names
+        try:
+            final_spk_identifier = SpeakerIdentifier(config)
+            profile_name_map = _load_profile_name_map(config)
+            if profile_name_map:
+                final_spk_identifier.known_speakers_map.update(profile_name_map)
+        except Exception as exc:
+            final_spk_identifier = None
+            logger.warning("SpeakerIdentifier unavailable for final transcripts; proceeding without naming: %s", exc)
+
+        ft_completed = 0
+        for group_name, video_path in merged_videos:
+            # Add substage for this group
+            dashboard.add_substage('final_transcription', group_name, 3)  # 3 steps: load, transcribe, write
+
+            out_txt = os.path.join(transcripts_final_dir, f"{group_name}_final_transcript.txt")
+            if os.path.exists(out_txt):
+                ft_completed += 1
+                dashboard.update_substage('final_transcription', group_name, 3)
+                dashboard.update_stage('final_transcription', ft_completed, f"Skip (exists): {group_name}")
+                dashboard.remove_substage('final_transcription', group_name)
+                continue
+
+            # Step 1: Extract start time from group_name (format: YYYYMMDD_HHMMSS_Cameras)
+            # Example: 20251015_215513_Entry+Frontdoor
+            dashboard.update_substage('final_transcription', group_name, 1)
+            video_start_time = None
+            try:
+                parts = group_name.split('_')
+                if len(parts) >= 2:
+                    date_str = parts[0]  # YYYYMMDD
+                    time_str = parts[1]  # HHMMSS
+                    from datetime import datetime
+                    video_start_time = datetime.strptime(f"{date_str}_{time_str}", "%Y%m%d_%H%M%S")
+            except Exception as e:
+                logger.warning(f"Could not parse timestamp from group name {group_name}: {e}")
+
+            # Step 2: Transcribe and diarize
+            diarization_result = None
+            try:
+                diarization_result = process_audio_for_transcription([video_path], config)
+                dashboard.update_substage('final_transcription', group_name, 2)
+            except Exception as exc:
+                logger.warning("Final transcription diarization failed for %s: %s", group_name, exc)
+                dashboard.update_substage('final_transcription', group_name, 2)
+
+            # Step 3: Format and write transcript
+            lines: List[str] = []
+            if diarization_result and diarization_result.get('segments'):
+                segments_to_write = diarization_result['segments']
+                if final_spk_identifier is not None:
+                    try:
+                        final_spk_identifier.process_transcript(segments_to_write, diarization_result.get('timeline', []))
+                        segments_to_write = final_spk_identifier.substitute_names_in_transcript(segments_to_write)
+                    except Exception as exc:
+                        logger.warning("Speaker resolution failed for final transcript %s: %s", group_name, exc)
+
+                # Format transcript like a script with timestamps
+                lines.append(f"=== TRANSCRIPT: {group_name} ===")
+                if video_start_time:
+                    lines.append(f"Recording started: {video_start_time.strftime('%B %d, %Y at %I:%M:%S %p')}")
+                lines.append("")
+
+                for entry in segments_to_write:
+                    spk = entry.get('speaker', 'Unknown')
+                    text = entry.get('text', '')
+                    start_seconds = entry.get('start', 0.0)
+
+                    # Calculate wall-clock time if we have video start time
+                    timestamp_str = ""
+                    if video_start_time:
+                        from datetime import timedelta
+                        actual_time = video_start_time + timedelta(seconds=start_seconds)
+                        timestamp_str = actual_time.strftime("%I:%M:%S %p")
+                    else:
+                        # Fallback: just show clip offset
+                        mins = int(start_seconds // 60)
+                        secs = int(start_seconds % 60)
+                        timestamp_str = f"+{mins:02d}:{secs:02d}"
+
+                    lines.append(f"[{timestamp_str}] {spk}: {text}")
+            else:
+                # Fallback plain whisper.cpp only (no diarization)
+                lines.append(f"=== TRANSCRIPT: {group_name} ===")
+                if video_start_time:
+                    lines.append(f"Recording started: {video_start_time.strftime('%B %d, %Y at %I:%M:%S %p')}")
+                lines.append("(No speaker diarization available)")
+                lines.append("")
+
+                try:
+                    from blink_pipeline.media_utils import extract_audio_segment
+                    from blink_pipeline.whisper_cpp_wrapper import WhisperCppWrapper
+                    whisper_cfg = (config.get('transcription') or {}).get('whisper', {})
+                    ggml = whisper_cfg.get('ggml_model_path')
+                    binary = whisper_cfg.get('whisper_cpp_binary')
+                    device = whisper_cfg.get('device', 'auto')
+                    import tempfile
+                    with tempfile.NamedTemporaryFile(suffix='.wav', delete=True) as tmp:
+                        if not extract_audio_segment(video_path, tmp.name):
+                            raise RuntimeError("Audio extraction failed")
+                        wrapper = WhisperCppWrapper(model_path=ggml, whisper_cpp_binary=binary, device=device)
+                        res = wrapper.transcribe(tmp.name, language=whisper_cfg.get('language'))
+
+                        # Use segments with timestamps if available
+                        segments = (res or {}).get('segments', [])
+                        if segments:
+                            for seg in segments:
+                                start_seconds = seg.get('start', 0.0)
+                                text = seg.get('text', '').strip()
+                                if not text:
+                                    continue
+
+                                # Calculate wall-clock time
+                                timestamp_str = ""
+                                if video_start_time:
+                                    from datetime import timedelta
+                                    actual_time = video_start_time + timedelta(seconds=start_seconds)
+                                    timestamp_str = actual_time.strftime("%I:%M:%S %p")
+                                else:
+                                    mins = int(start_seconds // 60)
+                                    secs = int(start_seconds % 60)
+                                    timestamp_str = f"+{mins:02d}:{secs:02d}"
+
+                                lines.append(f"[{timestamp_str}] {text}")
+                        else:
+                            # Ultimate fallback: just the raw text
+                            text = (res or {}).get('text', '').strip()
+                            if text:
+                                lines.append(text)
+                            else:
+                                lines.append("<transcription unavailable>")
+                except Exception as exc:
+                    logger.error("Plain transcription failed for final video %s: %s", group_name, exc)
+                    lines.append("<transcription unavailable>")
+
+            with open(out_txt, 'w', encoding='utf-8') as fh:
+                fh.write("\n".join(lines) + ("\n" if lines else ""))
+            ft_completed += 1
+            dashboard.update_substage('final_transcription', group_name, 3)
+            dashboard.update_stage('final_transcription', ft_completed, f"Done: {group_name}")
+            dashboard.remove_substage('final_transcription', group_name)
+
+        dashboard.complete_stage('final_transcription', f"{ft_completed} videos transcribed")
+        pipeline_logger.log_stage_end("Final Video Transcription", 6, success=True,
+                                      details=f"{ft_completed} videos")
+
+        # --- STAGE 7: Speaker Profiles Export (editable) ---
+        pipeline_logger.log_stage_start("Speaker Profiles Export", 7)
+        dashboard.start_stage('speaker_profiles', 1)
+        dashboard.add_substage('speaker_profiles', 'profiles.json', 1)
+        spk_count, prof_path = _write_speaker_profiles(config)
+        dashboard.update_substage('speaker_profiles', 'profiles.json', 1)
+        dashboard.update_stage('speaker_profiles', 1, f"{spk_count} speakers")
+        dashboard.remove_substage('speaker_profiles', 'profiles.json')
+        dashboard.complete_stage('speaker_profiles', f"Profiles at {prof_path}")
+        pipeline_logger.log_stage_end("Speaker Profiles Export", 7, success=True,
+                                      details=f"{spk_count} speakers exported")
 
     # Dashboard context manager closes here, printing final summary
     dashboard.print_summary()

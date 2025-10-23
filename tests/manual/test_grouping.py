@@ -6,7 +6,7 @@ logic correctly groups clips from multiple cameras based on overlapping timestam
 """
 
 from datetime import datetime, timedelta
-from src.grouping import group_videos
+from blink_pipeline.grouping import group_videos
 
 
 def create_test_clip(camera: str, time_offset_seconds: int, base_time: datetime) -> dict:
