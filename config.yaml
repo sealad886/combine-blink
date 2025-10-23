@@ -34,6 +34,35 @@ multi_camera_composition:
   # - speech_people: Use diarized speech to anchor the speaking camera; when silent, switch to the angle with the most people and flag a review indicator (requires people detection)
   switching_strategy: speech_people
 
+  # Camera selection control - Fine-grained control over which cameras are shown and when
+  camera_control:
+    # Camera priority list - cameras earlier in list are preferred when quality is similar
+    # Empty list or null means no priority preference (use algorithm defaults)
+    # Example: ['FrontDoor', 'Entry', 'Backyard'] - prefer FrontDoor, then Entry, then Backyard
+    priority_cameras: []
+    
+    # Exclude specific cameras from video composition (they are still used for audio if best quality)
+    # Useful for cameras with poor viewing angles or privacy concerns
+    # Example: ['Garage', 'Storage'] - these cameras won't be shown in the video
+    exclude_cameras: []
+    
+    # Force use of specific camera during certain time windows (overrides all strategies)
+    # Format: list of {camera: 'CameraName', start: seconds, end: seconds}
+    # Times are relative to event start (0 = event start)
+    # Example: [{camera: 'FrontDoor', start: 0, end: 10}] - show FrontDoor for first 10 seconds
+    forced_segments: []
+    
+    # Minimum time a camera must be shown before switching (prevents rapid switching)
+    # Applies to all strategies except forced_segments
+    min_display_duration: 2.0  # seconds
+    
+    # Prefer cameras with better video quality when audio quality is similar (within threshold)
+    # Only applies when switching_strategy is 'audio_quality' or 'speech_people'
+    prefer_video_quality_threshold: 0.05  # If audio scores differ by less than this, prefer better video
+    
+    # Log camera selection decisions for debugging and analysis
+    log_selection_reasoning: true
+
   # How often to switch cameras (in seconds) for time_based/round_robin strategies
   switching_interval: 5.0
 

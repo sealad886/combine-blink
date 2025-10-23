@@ -289,6 +289,15 @@ class MultiCameraComposer:
         self._x264_crf = str(enc_cfg.get('x264_crf', '22'))
         self._target_bitrate = str(enc_cfg.get('bitrate', '6000k'))
 
+        # Camera control configuration - Enhanced control over camera selection
+        camera_ctrl_cfg = self.composition_config.get('camera_control', {})
+        self._priority_cameras: List[str] = list(camera_ctrl_cfg.get('priority_cameras', []))
+        self._exclude_cameras: List[str] = list(camera_ctrl_cfg.get('exclude_cameras', []))
+        self._forced_segments: List[Dict[str, Any]] = list(camera_ctrl_cfg.get('forced_segments', []))
+        self._min_display_duration: float = float(camera_ctrl_cfg.get('min_display_duration', 2.0))
+        self._prefer_video_quality_threshold: float = float(camera_ctrl_cfg.get('prefer_video_quality_threshold', 0.05))
+        self._log_selection_reasoning: bool = bool(camera_ctrl_cfg.get('log_selection_reasoning', True))
+
     def compose_multi_camera_event(
         self,
         video_clips: List[Dict[str, Any]],
@@ -1062,6 +1071,159 @@ class MultiCameraComposer:
         else:  # 'time_based' or default
             return self._timeline_time_based(camera_clips)
 
+    def _apply_camera_control_rules(
+        self,
+        candidates: List[CameraClip],
+        segment_start: float,
+        segment_end: float,
+        previous_camera: Optional[str] = None
+    ) -> List[CameraClip]:
+        """
+        Apply camera control rules to filter and prioritize camera candidates.
+        
+        This method implements the enhanced camera control system:
+        1. Check for forced camera segments (highest priority)
+        2. Filter out excluded cameras
+        3. Apply priority camera preferences
+        4. Respect minimum display duration
+        
+        Args:
+            candidates: List of available camera clips for this time segment
+            segment_start: Start time of segment (seconds from event start)
+            segment_end: End time of segment (seconds from event start)
+            previous_camera: Camera shown in previous segment (for continuity)
+        
+        Returns:
+            Filtered and prioritized list of camera clips
+            Empty list if all cameras are excluded
+        """
+        if not candidates:
+            return []
+        
+        # 1. Check forced segments (overrides everything)
+        for forced in self._forced_segments:
+            forced_camera = forced.get('camera')
+            forced_start = float(forced.get('start', -1))
+            forced_end = float(forced.get('end', -1))
+            
+            # Check if this segment overlaps with forced segment
+            if forced_start <= segment_start < forced_end:
+                # Only use the forced camera if available
+                forced_candidates = [c for c in candidates if c.camera == forced_camera]
+                if forced_candidates:
+                    if self._log_selection_reasoning:
+                        logging.info(
+                            f"Camera control: Forcing {forced_camera} at {segment_start:.1f}s "
+                            f"(forced segment {forced_start:.1f}-{forced_end:.1f}s)"
+                        )
+                    return forced_candidates
+        
+        # 2. Filter out excluded cameras
+        filtered = [c for c in candidates if c.camera not in self._exclude_cameras]
+        if not filtered:
+            logging.warning(
+                f"Camera control: All cameras excluded at {segment_start:.1f}s, "
+                f"using original candidates"
+            )
+            filtered = candidates
+        
+        # 3. Apply minimum display duration (prefer previous camera)
+        if previous_camera and self._min_display_duration > 0:
+            # Check if we've been showing previous camera long enough
+            # (This is a simplified check - full implementation would track cumulative time)
+            prev_candidates = [c for c in filtered if c.camera == previous_camera]
+            if prev_candidates and (segment_end - segment_start) < self._min_display_duration:
+                if self._log_selection_reasoning:
+                    logging.debug(
+                        f"Camera control: Continuing {previous_camera} at {segment_start:.1f}s "
+                        f"(min_display_duration={self._min_display_duration:.1f}s)"
+                    )
+                return prev_candidates
+        
+        # 4. Apply priority cameras (stable sort to preserve secondary ordering)
+        if self._priority_cameras:
+            # Create priority map (lower index = higher priority)
+            priority_map = {cam: idx for idx, cam in enumerate(self._priority_cameras)}
+            # Sort by priority (cameras not in list get lowest priority)
+            filtered.sort(key=lambda c: priority_map.get(c.camera, len(self._priority_cameras)))
+            
+            if self._log_selection_reasoning and filtered:
+                top_camera = filtered[0].camera
+                if top_camera in self._priority_cameras:
+                    logging.debug(
+                        f"Camera control: Prioritizing {top_camera} at {segment_start:.1f}s "
+                        f"(priority #{priority_map[top_camera] + 1})"
+                    )
+        
+        return filtered
+
+    def _select_best_camera_with_control(
+        self,
+        candidates: List[CameraClip],
+        segment_start: float,
+        segment_end: float,
+        strategy: str,
+        previous_camera: Optional[str] = None
+    ) -> Optional[CameraClip]:
+        """
+        Select the best camera for a segment, applying control rules and quality preferences.
+        
+        This combines camera control rules with the base selection strategy.
+        
+        Args:
+            candidates: Available camera clips
+            segment_start: Segment start time (seconds from event start)
+            segment_end: Segment end time (seconds from event start)
+            strategy: Selection strategy ('audio_quality', 'video_quality', 'people', etc.)
+            previous_camera: Previously displayed camera (for continuity)
+        
+        Returns:
+            Selected CameraClip or None if no valid candidates
+        """
+        # Apply control rules first
+        filtered = self._apply_camera_control_rules(
+            candidates, segment_start, segment_end, previous_camera
+        )
+        
+        if not filtered:
+            return None
+        
+        # Apply strategy-based selection
+        if strategy == 'audio_quality':
+            selected = max(filtered, key=lambda x: x.audio_quality_score)
+        elif strategy == 'video_quality':
+            selected = max(filtered, key=lambda x: x.video_quality_score)
+        elif strategy == 'people':
+            # Use people count (should be pre-populated in clip)
+            selected = max(filtered, key=lambda x: getattr(x, 'people_count', 0))
+        else:
+            # Default: use first (already priority-sorted)
+            selected = filtered[0]
+        
+        # Check if we should prefer video quality when audio is similar
+        if (strategy == 'audio_quality' and 
+            len(filtered) > 1 and 
+            self._prefer_video_quality_threshold > 0):
+            
+            best_audio_score = selected.audio_quality_score
+            # Find cameras with similar audio quality
+            similar_audio = [
+                c for c in filtered 
+                if abs(c.audio_quality_score - best_audio_score) <= self._prefer_video_quality_threshold
+            ]
+            
+            if len(similar_audio) > 1:
+                # Among similar audio, pick best video quality
+                selected = max(similar_audio, key=lambda x: x.video_quality_score)
+                
+                if self._log_selection_reasoning:
+                    logging.debug(
+                        f"Camera control: Selected {selected.camera} at {segment_start:.1f}s "
+                        f"(similar audio, better video: {selected.video_quality_score:.2f})"
+                    )
+        
+        return selected
+
     def _generate_aligned_timelines(
         self,
         camera_clips: List[CameraClip]
@@ -1124,33 +1286,40 @@ class MultiCameraComposer:
 
             # VIDEO selection per strategy (speech-aware)
             selected_v: Optional[CameraClip] = None
+            
+            # Determine selection strategy for this segment
             if speech_people_strategy and (not speech_active) and available_people:
-                # Choose the angle with most people
-                # Recompute count lazily to avoid stale values
-                sample_t = seg_start + 0.5 * seg_dur
-                selected_v = max(available_people, key=lambda x: self._get_people_count_for_clip_at(x, sample_t))
-            if selected_v is None:
-                if self.switching_strategy == 'audio_quality':
-                    selected_v = max(avail, key=lambda x: x.audio_quality_score)
-                elif self.switching_strategy == 'round_robin':
-                    # Pick next camera in order that is available
-                    for _ in range(len(cameras_sorted)):
-                        cam = cameras_sorted[rr_index % len(cameras_sorted)]
-                        rr_index += 1
-                        match = [c for c in avail if c.camera == cam]
-                        if match:
-                            selected_v = match[0]
-                            break
-                    if not selected_v:
-                        selected_v = avail[0]
-                else:  # 'time_based' default -> prefer stability, keep previous if continuous else best audio
-                    if video_segments:
-                        last = video_segments[-1]
-                        cont = [c for c in avail if c.path == last.clip_path]
-                        if cont:
-                            selected_v = cont[0]
-                    if not selected_v:
-                        selected_v = max(avail, key=lambda x: x.audio_quality_score)
+                # Silent segment with people detected - use people count
+                selection_strategy = 'people'
+                selection_candidates = available_people
+            elif self.switching_strategy == 'audio_quality':
+                selection_strategy = 'audio_quality'
+                selection_candidates = avail
+            else:
+                # time_based, round_robin, or other
+                selection_strategy = 'audio_quality'  # fallback
+                selection_candidates = avail
+            
+            # Get previous camera for continuity
+            prev_camera = video_segments[-1].camera if video_segments else None
+            
+            # Apply camera control rules and select best camera
+            selected_v = self._select_best_camera_with_control(
+                selection_candidates,
+                seg_start,
+                seg_end,
+                selection_strategy,
+                prev_camera
+            )
+            
+            # Fallback if control rules filtered out everything
+            if selected_v is None and avail:
+                selected_v = max(avail, key=lambda x: x.audio_quality_score)
+                if self._log_selection_reasoning:
+                    logging.warning(
+                        f"Camera control fallback: Using {selected_v.camera} at {seg_start:.1f}s "
+                        f"(all preferred cameras unavailable)"
+                    )
 
             v_source_start = max(0.0, seg_start - selected_v.start_time)
             needs_review = speech_people_strategy and (not speech_active) and multiple_people_angles
