@@ -4,6 +4,10 @@ Multi-camera video composition module.
 This module handles compositing videos from multiple cameras that recorded the same
 event from different angles. It analyzes audio quality, selects optimal camera angles,
 and creates a final composite video with the best footage and audio.
+
+FEATURE FLAG: use_modular_composition
+  When enabled, uses the new modular composition architecture from
+  blink_pipeline.composition instead of the legacy monolithic implementation.
 """
 
 import logging
@@ -16,6 +20,7 @@ import io
 from datetime import datetime, timedelta
 from typing import Callable, List, Dict, Any, Tuple, Optional
 from dataclasses import dataclass
+from pathlib import Path
 import numpy as np
 
 from PIL import Image
@@ -64,6 +69,37 @@ class MultiCameraComposer:
         """
         self.config = config
         self.composition_config = config.get('multi_camera_composition', {})
+        
+        # Feature flag: Use modular composition architecture
+        self._use_modular_composition = bool(
+            self.composition_config.get('use_modular_composition', False)
+        )
+        
+        # Initialize modular quality analyzer if feature flag is enabled
+        if self._use_modular_composition:
+            from blink_pipeline.composition import (
+                FFmpegAudioQualityAnalyzer,
+                CachedQualityAnalyzer,
+            )
+            
+            # Determine cache directory for quality analysis
+            cache_base = self.config.get('output', {}).get('audio_cache_dir', 'output/audio_cache')
+            if cache_base:
+                quality_cache_dir = Path(cache_base) / 'quality_analysis'
+            else:
+                quality_cache_dir = None
+            
+            # Create analyzers
+            base_analyzer = FFmpegAudioQualityAnalyzer(timeout=30)
+            self._modular_quality_analyzer = CachedQualityAnalyzer(
+                base_analyzer,
+                cache_dir=quality_cache_dir
+            )
+            
+            logging.info("✅ Modular composition enabled - using blink_pipeline.composition.quality")
+        else:
+            self._modular_quality_analyzer = None
+            logging.debug("Using legacy quality analysis implementation")
 
         # Default composition settings
         self.switching_strategy = self.composition_config.get('switching_strategy', 'time_based')
@@ -731,6 +767,60 @@ class MultiCameraComposer:
     def _calculate_audio_quality(self, video_path: str, media_info: Any) -> float:
         """
         Calculate audio quality score for a video clip.
+        
+        FEATURE FLAG: Uses modular implementation if use_modular_composition is enabled,
+        otherwise falls back to legacy implementation.
+
+        Uses ffmpeg to analyze audio properties like volume, noise level, etc.
+        Higher score = better quality.
+
+        Args:
+            video_path: Path to video file
+            media_info: Media info from probe
+
+        Returns:
+            float: Quality score (0.0 to 1.0, higher is better)
+        """
+        # FEATURE FLAG: Use modular quality analyzer if enabled
+        if self._use_modular_composition and self._modular_quality_analyzer:
+            return self._calculate_audio_quality_modular(video_path, media_info)
+        
+        # LEGACY: Original monolithic implementation
+        return self._calculate_audio_quality_legacy(video_path, media_info)
+    
+    def _calculate_audio_quality_modular(self, video_path: str, media_info: Any) -> float:
+        """
+        Calculate audio quality using modular composition architecture.
+        
+        Args:
+            video_path: Path to video file
+            media_info: Media info from probe
+        
+        Returns:
+            float: Quality score (0.0 to 1.0, higher is better)
+        """
+        # Check if video has audio
+        has_audio = media_info.has_audio if hasattr(media_info, 'has_audio') else (
+            hasattr(media_info, 'audio_streams') and len(media_info.audio_streams) > 0
+        )
+        
+        # Analyze audio quality
+        metrics = self._modular_quality_analyzer.analyze(
+            Path(video_path),
+            has_audio=has_audio
+        )
+        
+        # Calculate weighted score
+        score_result = self._modular_quality_analyzer.score(
+            metrics,
+            self._quality_weights
+        )
+        
+        return score_result.overall
+    
+    def _calculate_audio_quality_legacy(self, video_path: str, media_info: Any) -> float:
+        """
+        Calculate audio quality score for a video clip (LEGACY IMPLEMENTATION).
 
         Uses ffmpeg to analyze audio properties like volume, noise level, etc.
         Higher score = better quality.
