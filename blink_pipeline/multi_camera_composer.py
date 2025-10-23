@@ -76,33 +76,33 @@ class MultiCameraComposer:
         """
         self.config = config
         self.composition_config = config.get('multi_camera_composition', {})
-        
+
         # Feature flag: Use modular composition architecture
         self._use_modular_composition = bool(
             self.composition_config.get('use_modular_composition', False)
         )
-        
+
         # Initialize modular quality analyzer if feature flag is enabled
         if self._use_modular_composition:
             from blink_pipeline.composition import (
                 FFmpegAudioQualityAnalyzer,
                 CachedQualityAnalyzer,
             )
-            
+
             # Determine cache directory for quality analysis
             cache_base = self.config.get('output', {}).get('audio_cache_dir', 'output/audio_cache')
             if cache_base:
                 quality_cache_dir = Path(cache_base) / 'quality_analysis'
             else:
                 quality_cache_dir = None
-            
+
             # Create analyzers
             base_analyzer = FFmpegAudioQualityAnalyzer(timeout=30)
             self._modular_quality_analyzer = CachedQualityAnalyzer(
                 base_analyzer,
                 cache_dir=quality_cache_dir
             )
-            
+
             logging.info("✅ Modular composition enabled - using blink_pipeline.composition modules")
         else:
             self._modular_quality_analyzer = None
@@ -161,7 +161,7 @@ class MultiCameraComposer:
         # Storage for per-camera alignment metadata
         self._alignment_offsets: Dict[str, float] = {}
         self._alignment_drifts: Dict[str, float] = {}
-        
+
         # Initialize modular alignment engine if feature flag is enabled
         if self._use_modular_composition and self._alignment_enabled:
             alignment_cfg = AlignmentConfig(
@@ -352,30 +352,30 @@ class MultiCameraComposer:
             if self._alignment_enabled:
                 try:
                     ref_clip = max(camera_clips, key=lambda x: x.audio_quality_score)
-                    
+
                     # FEATURE FLAG: Use modular alignment engine or legacy implementation
                     if self._use_modular_composition and self._modular_alignment_engine:
                         logging.info("Using modular AlignmentEngine for audio alignment")
-                        
+
                         # Prepare camera_clips dict for modular engine
                         camera_clips_dict: Dict[str, List[Path]] = {}
                         for cc in camera_clips:
                             if cc.camera not in camera_clips_dict:
                                 camera_clips_dict[cc.camera] = []
                             camera_clips_dict[cc.camera].append(Path(cc.path))
-                        
+
                         # Run alignment with modular engine
                         alignment_results = self._modular_alignment_engine.align_clips(
                             camera_clips=camera_clips_dict,
                             ref_camera=ref_clip.camera
                         )
-                        
+
                         # Convert results to legacy format for compatibility
                         clip_offsets = {
                             result.camera: result.offset_seconds
                             for result in alignment_results
                         }
-                        
+
                         # Log alignment results
                         for result in alignment_results:
                             logging.info(
@@ -396,7 +396,7 @@ class MultiCameraComposer:
                             hp=self._alignment_hp,
                             lp=self._alignment_lp,
                         )
-                    
+
                     # Store and apply per-clip base offsets (common for both implementations)
                     self._alignment_offsets_clip = dict(clip_offsets or {})
                     if self._alignment_offsets_clip:
@@ -830,7 +830,7 @@ class MultiCameraComposer:
     def _calculate_audio_quality(self, video_path: str, media_info: Any) -> float:
         """
         Calculate audio quality score for a video clip.
-        
+
         FEATURE FLAG: Uses modular implementation if use_modular_composition is enabled,
         otherwise falls back to legacy implementation.
 
@@ -847,18 +847,18 @@ class MultiCameraComposer:
         # FEATURE FLAG: Use modular quality analyzer if enabled
         if self._use_modular_composition and self._modular_quality_analyzer:
             return self._calculate_audio_quality_modular(video_path, media_info)
-        
+
         # LEGACY: Original monolithic implementation
         return self._calculate_audio_quality_legacy(video_path, media_info)
-    
+
     def _calculate_audio_quality_modular(self, video_path: str, media_info: Any) -> float:
         """
         Calculate audio quality using modular composition architecture.
-        
+
         Args:
             video_path: Path to video file
             media_info: Media info from probe
-        
+
         Returns:
             float: Quality score (0.0 to 1.0, higher is better)
         """
@@ -866,21 +866,21 @@ class MultiCameraComposer:
         has_audio = media_info.has_audio if hasattr(media_info, 'has_audio') else (
             hasattr(media_info, 'audio_streams') and len(media_info.audio_streams) > 0
         )
-        
+
         # Analyze audio quality
         metrics = self._modular_quality_analyzer.analyze(
             Path(video_path),
             has_audio=has_audio
         )
-        
+
         # Calculate weighted score
         score_result = self._modular_quality_analyzer.score(
             metrics,
             self._quality_weights
         )
-        
+
         return score_result.overall
-    
+
     def _calculate_audio_quality_legacy(self, video_path: str, media_info: Any) -> float:
         """
         Calculate audio quality score for a video clip (LEGACY IMPLEMENTATION).

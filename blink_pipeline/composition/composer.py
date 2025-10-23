@@ -16,7 +16,7 @@ from pathlib import Path
 from .config import CompositionConfig
 from .models import CameraClip, SpeechSegment, Timeline
 from .quality import FFmpegAudioQualityAnalyzer, CachedQualityAnalyzer
-from .alignment import AlignmentEngine
+from .alignment import CachedAlignmentEngine
 from .timeline import TimelineGenerator
 from .rendering import SinglePassRenderer, MultiPassRenderer
 from .audio import AudioProcessor
@@ -35,9 +35,8 @@ class ModularComposer:
             FFmpegAudioQualityAnalyzer(),
             cache_dir=Path('output/audio_cache')
         )
-        self.alignment_engine = AlignmentEngine(
-            self.config.audio_alignment,
-            cache_dir=Path('output/audio_cache')
+        self.alignment_engine = CachedAlignmentEngine(
+            self.config.audio_alignment
         )
         self.timeline_generator = TimelineGenerator(self.config)
         self.audio_processor = AudioProcessor(self.config.audio_cleanup)
