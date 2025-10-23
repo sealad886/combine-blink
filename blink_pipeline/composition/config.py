@@ -21,12 +21,12 @@ from pydantic import BaseModel, Field, field_validator
 
 class AudioQualityWeights(BaseModel):
     """Weights for audio quality scoring metrics."""
-    
+
     rms: float = Field(default=0.4, ge=0.0, le=1.0, description="RMS level weight")
     peak: float = Field(default=0.2, ge=0.0, le=1.0, description="Peak level weight")
     noise: float = Field(default=0.2, ge=0.0, le=1.0, description="Noise floor weight")
     clipping: float = Field(default=0.3, ge=0.0, le=1.0, description="Clipping rate weight")
-    
+
     @field_validator('rms', 'peak', 'noise', 'clipping')
     @classmethod
     def validate_positive(cls, v: float) -> float:
@@ -37,7 +37,7 @@ class AudioQualityWeights(BaseModel):
 
 class AlignmentConfig(BaseModel):
     """Configuration for audio alignment."""
-    
+
     enabled: bool = Field(default=True, description="Enable audio alignment")
     max_shift_seconds: float = Field(default=1.5, ge=0.0, description="Maximum alignment shift")
     analysis_window_seconds: float = Field(default=12.0, gt=0.0, description="Analysis window duration")
@@ -51,7 +51,7 @@ class AlignmentConfig(BaseModel):
 
 class PeopleDetectionConfig(BaseModel):
     """Configuration for people detection."""
-    
+
     enabled: bool = Field(default=True, description="Enable people detection")
     backend: str = Field(default='auto', description="Detection backend (auto, vision, huggingface)")
     sample_frames: int = Field(default=12, gt=0, description="Number of frames to sample")
@@ -65,7 +65,7 @@ class PeopleDetectionConfig(BaseModel):
 
 class TimestampOverlayConfig(BaseModel):
     """Configuration for timestamp overlay."""
-    
+
     enabled: bool = Field(default=True, description="Enable timestamp overlay")
     font: str = Field(default='Arial', description="Font name")
     font_size: int = Field(default=24, gt=0, description="Font size")
@@ -76,7 +76,7 @@ class TimestampOverlayConfig(BaseModel):
 
 class EncodingConfig(BaseModel):
     """Configuration for video encoding."""
-    
+
     use_hw_encode: bool = Field(default=True, description="Use hardware encoding")
     hw_codec: str = Field(default='h264_videotoolbox', description="Hardware codec")
     x264_preset: Optional[str] = Field(default=None, description="Software encoding preset")
@@ -86,7 +86,7 @@ class EncodingConfig(BaseModel):
 
 class AudioCleanupConfig(BaseModel):
     """Configuration for audio cleanup."""
-    
+
     enabled: bool = Field(default=True, description="Enable audio cleanup")
     highpass_hz: float = Field(default=80.0, ge=0.0, description="Highpass filter cutoff")
     lowpass_hz: float = Field(default=8000.0, gt=0.0, description="Lowpass filter cutoff")
@@ -101,7 +101,7 @@ class AudioCleanupConfig(BaseModel):
 
 class CompositionConfig(BaseModel):
     """Main configuration for multi-camera composition."""
-    
+
     enable_composition: bool = Field(default=True, description="Enable multi-camera composition")
     use_modular_composition: bool = Field(default=False, description="Use modular architecture")
     switching_strategy: str = Field(default='speech_people', description="Camera switching strategy")
@@ -111,7 +111,7 @@ class CompositionConfig(BaseModel):
     audio_crossfade_seconds: float = Field(default=0.06, ge=0.0, description="Audio crossfade duration")
     audio_source: str = Field(default='best_quality', description="Audio source selection strategy")
     single_pass_filter_complex: bool = Field(default=False, description="Use single-pass rendering")
-    
+
     # Nested configurations
     audio_quality_weights: AudioQualityWeights = Field(default_factory=AudioQualityWeights)
     audio_alignment: AlignmentConfig = Field(default_factory=AlignmentConfig)
@@ -119,7 +119,7 @@ class CompositionConfig(BaseModel):
     timestamp_overlay: TimestampOverlayConfig = Field(default_factory=TimestampOverlayConfig)
     encoding: EncodingConfig = Field(default_factory=EncodingConfig)
     audio_cleanup: AudioCleanupConfig = Field(default_factory=AudioCleanupConfig)
-    
+
     @field_validator('switching_strategy')
     @classmethod
     def validate_strategy(cls, v: str) -> str:
@@ -127,7 +127,7 @@ class CompositionConfig(BaseModel):
         if v not in valid:
             raise ValueError(f"Invalid switching_strategy: {v}. Must be one of {valid}")
         return v
-    
+
     @field_validator('transition_style')
     @classmethod
     def validate_transition(cls, v: str) -> str:
@@ -135,7 +135,7 @@ class CompositionConfig(BaseModel):
         if v not in valid:
             raise ValueError(f"Invalid transition_style: {v}. Must be one of {valid}")
         return v
-    
+
     @field_validator('audio_source')
     @classmethod
     def validate_audio_source(cls, v: str) -> str:
@@ -143,7 +143,7 @@ class CompositionConfig(BaseModel):
         if v not in valid:
             raise ValueError(f"Invalid audio_source: {v}. Must be one of {valid}")
         return v
-    
+
     @classmethod
     def from_dict(cls, config_dict: Dict[str, Any]) -> 'CompositionConfig':
         """Create CompositionConfig from dictionary (e.g., from YAML)."""

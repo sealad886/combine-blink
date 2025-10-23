@@ -25,11 +25,11 @@ from .overlay import OverlayGenerator
 
 class ModularComposer:
     """Main multi-camera composition orchestrator."""
-    
+
     def __init__(self, config_dict: Dict[str, Any]):
         """Initialize composer with configuration dictionary."""
         self.config = CompositionConfig.from_dict(config_dict.get('multi_camera_composition', {}))
-        
+
         # Initialize modules
         self.quality_analyzer = CachedQualityAnalyzer(
             FFmpegAudioQualityAnalyzer(),
@@ -42,13 +42,13 @@ class ModularComposer:
         self.timeline_generator = TimelineGenerator(self.config)
         self.audio_processor = AudioProcessor(self.config.audio_cleanup)
         self.overlay_generator = OverlayGenerator(self.config.timestamp_overlay)
-        
+
         # Select renderer
         if self.config.single_pass_filter_complex:
             self.renderer = SinglePassRenderer(self.config)
         else:
             self.renderer = MultiPassRenderer(self.config)
-    
+
     def compose_multi_camera_event(
         self,
         video_clips: List[Dict[str, Any]],
@@ -59,23 +59,23 @@ class ModularComposer:
     ) -> bool:
         """
         Compose multi-camera event into single video.
-        
+
         Args:
             video_clips: List of clip dictionaries from discovery
             output_video_path: Output path for composed video
             speech_segments: Optional speech segments from diarization
             speech_timeline: Optional speech timeline
             progress_callback: Optional progress callback
-        
+
         Returns:
             True if successful, False otherwise
         """
         raise NotImplementedError("Phase 5 integration pending")
-    
+
     def _convert_clips(self, video_clips: List[Dict[str, Any]]) -> List[CameraClip]:
         """Convert legacy clip format to CameraClip models."""
         raise NotImplementedError("Phase 5 integration pending")
-    
+
     def _convert_speech(self, speech_segments: Optional[List[Dict[str, Any]]]) -> Optional[List[SpeechSegment]]:
         """Convert legacy speech format to SpeechSegment models."""
         raise NotImplementedError("Phase 5 integration pending")

@@ -18,15 +18,15 @@ from .config import AudioCleanupConfig
 
 class AudioProcessor:
     """Audio processing for cleanup, normalization, and crossfading."""
-    
+
     def __init__(self, config: AudioCleanupConfig):
         """Initialize processor with configuration."""
         self.config = config
-    
+
     def build_cleanup_filter(self) -> str:
         """Build FFmpeg audio cleanup filter chain."""
         raise NotImplementedError("Phase 4 implementation pending")
-    
+
     def apply_cleanup(
         self,
         audio: np.ndarray,
@@ -34,7 +34,7 @@ class AudioProcessor:
     ) -> np.ndarray:
         """Apply audio cleanup filters."""
         raise NotImplementedError("Phase 4 implementation pending")
-    
+
     def crossfade(
         self,
         audio1: np.ndarray,
@@ -44,7 +44,7 @@ class AudioProcessor:
     ) -> np.ndarray:
         """Crossfade between two audio segments."""
         raise NotImplementedError("Phase 4 implementation pending")
-    
+
     def normalize_loudness(
         self,
         audio: np.ndarray,

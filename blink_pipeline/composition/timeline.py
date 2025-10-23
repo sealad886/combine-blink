@@ -24,11 +24,11 @@ from .config import CompositionConfig
 
 class TimelineStrategy(ABC):
     """Abstract base class for timeline generation strategies."""
-    
+
     def __init__(self, config: CompositionConfig):
         """Initialize strategy with configuration."""
         self.config = config
-    
+
     @abstractmethod
     def generate(
         self,
@@ -41,7 +41,7 @@ class TimelineStrategy(ABC):
 
 class TimeBasedStrategy(TimelineStrategy):
     """Switch cameras at regular time intervals."""
-    
+
     def generate(
         self,
         clips: List[CameraClip],
@@ -53,7 +53,7 @@ class TimeBasedStrategy(TimelineStrategy):
 
 class RoundRobinStrategy(TimelineStrategy):
     """Cycle through cameras equally."""
-    
+
     def generate(
         self,
         clips: List[CameraClip],
@@ -65,7 +65,7 @@ class RoundRobinStrategy(TimelineStrategy):
 
 class AudioQualityStrategy(TimelineStrategy):
     """Prefer camera with best audio quality."""
-    
+
     def generate(
         self,
         clips: List[CameraClip],
@@ -77,7 +77,7 @@ class AudioQualityStrategy(TimelineStrategy):
 
 class SpeechPeopleStrategy(TimelineStrategy):
     """Anchor to speech, fall back to people detection during silence."""
-    
+
     def generate(
         self,
         clips: List[CameraClip],
@@ -89,12 +89,12 @@ class SpeechPeopleStrategy(TimelineStrategy):
 
 class TimelineGenerator:
     """Main timeline generator with strategy selection."""
-    
+
     def __init__(self, config: CompositionConfig):
         """Initialize generator with configuration."""
         self.config = config
         self._strategy = self._create_strategy()
-    
+
     def _create_strategy(self) -> TimelineStrategy:
         """Create strategy based on configuration."""
         strategy_name = self.config.switching_strategy
@@ -108,7 +108,7 @@ class TimelineGenerator:
             return SpeechPeopleStrategy(self.config)
         else:
             raise ValueError(f"Unknown strategy: {strategy_name}")
-    
+
     def generate(
         self,
         clips: List[CameraClip],

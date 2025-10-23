@@ -18,11 +18,11 @@ from .models import CompositionSegment
 
 class OverlayGenerator:
     """Generate text overlays for video composition."""
-    
+
     def __init__(self, config: TimestampOverlayConfig):
         """Initialize generator with configuration."""
         self.config = config
-    
+
     def build_timestamp_filter(
         self,
         base_time: datetime,
@@ -30,14 +30,14 @@ class OverlayGenerator:
     ) -> str:
         """Build FFmpeg drawtext filter for timestamps."""
         raise NotImplementedError("Phase 4 implementation pending")
-    
+
     def build_review_indicator_filter(
         self,
         segment: CompositionSegment
     ) -> Optional[str]:
         """Build FFmpeg filter for review indicator if needed."""
         raise NotImplementedError("Phase 4 implementation pending")
-    
+
     def format_timestamp(
         self,
         time: datetime,

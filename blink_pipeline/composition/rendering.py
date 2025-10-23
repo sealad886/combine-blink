@@ -21,11 +21,11 @@ from .config import CompositionConfig
 
 class CompositionRenderer(ABC):
     """Abstract base class for composition renderers."""
-    
+
     def __init__(self, config: CompositionConfig):
         """Initialize renderer with configuration."""
         self.config = config
-    
+
     @abstractmethod
     def render(
         self,
@@ -36,7 +36,7 @@ class CompositionRenderer(ABC):
     ) -> bool:
         """Render composition to output file."""
         pass
-    
+
     def _build_filter_complex(
         self,
         clips: list[CameraClip],
@@ -48,7 +48,7 @@ class CompositionRenderer(ABC):
 
 class SinglePassRenderer(CompositionRenderer):
     """Single-pass filter_complex rendering (faster)."""
-    
+
     def render(
         self,
         clips: list[CameraClip],
@@ -62,7 +62,7 @@ class SinglePassRenderer(CompositionRenderer):
 
 class MultiPassRenderer(CompositionRenderer):
     """Multi-pass rendering fallback for complex compositions."""
-    
+
     def render(
         self,
         clips: list[CameraClip],

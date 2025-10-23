@@ -20,13 +20,13 @@ from .config import AlignmentConfig
 
 class AlignmentEngine:
     """Audio alignment engine using GCC-PHAT."""
-    
+
     def __init__(self, config: AlignmentConfig, cache_dir: Optional[Path] = None):
         """Initialize alignment engine."""
         self.config = config
         self.cache_dir = cache_dir
         pass  # TODO: Implement
-    
+
     def estimate_offset(
         self,
         clip1: CameraClip,
@@ -35,7 +35,7 @@ class AlignmentEngine:
     ) -> AlignmentResult:
         """Estimate time offset between two clips."""
         raise NotImplementedError("Phase 2 implementation pending")
-    
+
     def align_clips(
         self,
         clips: list[CameraClip],
@@ -43,7 +43,7 @@ class AlignmentEngine:
     ) -> Dict[str, AlignmentResult]:
         """Align all clips to a reference clip."""
         raise NotImplementedError("Phase 2 implementation pending")
-    
+
     def _gcc_phat(
         self,
         audio1: np.ndarray,
