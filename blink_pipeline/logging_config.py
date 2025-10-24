@@ -9,7 +9,7 @@ import logging
 import logging.handlers
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone as tz
 from pathlib import Path
 
 
@@ -53,7 +53,7 @@ class PipelineLogger:
             suppress_patterns: Substrings to suppress in file logs (e.g., ['[MONITOR]', '[PROGRESS]'])
         """
         self.log_dir = Path(log_dir)
-        self.log_dir.mkdir(exist_ok=True)
+        self.log_dir.mkdir(parents=True, exist_ok=True)
 
         # Convert log level strings to logging constants
         self.log_level = getattr(logging, log_level.upper(), logging.INFO)
@@ -66,7 +66,7 @@ class PipelineLogger:
         self.suppress_patterns = list(suppress_patterns or ["[MONITOR]", "[PROGRESS]"])
 
         # Session identifier for archival logs
-        self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.session_id = datetime.now(tz.utc).strftime("%Y%m%d_%H%M%S")
 
         # Configure root logger
         self._configure_root_logger()
@@ -143,60 +143,61 @@ class PipelineLogger:
     def log_session_start(self, config: dict):
         """Log session start with configuration details."""
         logging.getLogger("pipeline").info("=" * 80)
-        logging.getLogger("pipeline").info(f"PIPELINE SESSION STARTED: {self.session_id}")
+        logging.getLogger("pipeline").info("PIPELINE SESSION STARTED: %s", self.session_id)
         logging.getLogger("pipeline").info("=" * 80)
-        logging.getLogger("pipeline").info(f"Log directory: {self.log_dir.absolute()}")
-        logging.getLogger("pipeline").info(f"Log level: {logging.getLevelName(self.log_level)}")
-        logging.getLogger("pipeline").info(f"Python version: {sys.version}")
-        logging.getLogger("pipeline").info(f"Working directory: {os.getcwd()}")
+        logging.getLogger("pipeline").info("Log directory: %s", self.log_dir.absolute())
+        logging.getLogger("pipeline").info("Log level: %s", logging.getLevelName(self.log_level))
+        logging.getLogger("pipeline").info("Python version: %s", sys.version)
+        logging.getLogger("pipeline").info("Working directory: %s", os.getcwd())
 
         # Log key configuration
         logging.getLogger("pipeline").info("Configuration:")
-        logging.getLogger("pipeline").info(f"  Input directory: {config['paths']['input_dir']}")
-        logging.getLogger("pipeline").info(f"  Output directory: {config['paths']['output_dir']}")
-        logging.getLogger("pipeline").info(f"  Max time diff: {config['grouping']['max_time_diff_seconds']}s")
-        logging.getLogger("pipeline").info(f"  Transcription workers: {config.get('concurrency', {}).get('transcription_workers', 'auto')}")
-        logging.getLogger("pipeline").info(f"  Merge workers: {config.get('concurrency', {}).get('merge_workers', 'auto')}")
+        logging.getLogger("pipeline").info("  Input directory: %s", config['paths']['input_dir'])
+        logging.getLogger("pipeline").info("  Output directory: %s", config['paths']['output_dir'])
+        logging.getLogger("pipeline").info("  Max time diff: %ss", config['grouping']['max_time_diff_seconds'])
+        logging.getLogger("pipeline").info("  Transcription workers: %s", config.get('concurrency', {}).get('transcription_workers', 'auto'))
+        logging.getLogger("pipeline").info("  Merge workers: %s", config.get('concurrency', {}).get('merge_workers', 'auto'))
 
     def log_session_end(self, success: bool = True):
         """Log session end."""
         logging.getLogger("pipeline").info("=" * 80)
         if success:
-            logging.getLogger("pipeline").info(f"PIPELINE SESSION COMPLETED SUCCESSFULLY: {self.session_id}")
+            logging.getLogger("pipeline").info("PIPELINE SESSION COMPLETED SUCCESSFULLY: %s", self.session_id)
         else:
-            logging.getLogger("pipeline").error(f"PIPELINE SESSION FAILED: {self.session_id}")
+            logging.getLogger("pipeline").error("PIPELINE SESSION FAILED: %s", self.session_id)
         logging.getLogger("pipeline").info("=" * 80)
 
     def log_stage_start(self, stage_name: str, stage_number: int, details: str = ""):
         """Log the start of a pipeline stage."""
         logging.getLogger("pipeline").info("-" * 80)
-        logging.getLogger("pipeline").info(f"STAGE {stage_number}: {stage_name} - START")
+        logging.getLogger("pipeline").info("STAGE %d: %s - START", stage_number, stage_name)
         if details:
-            logging.getLogger("pipeline").info(f"  {details}")
+            logging.getLogger("pipeline").info("  %s", details)
         logging.getLogger("pipeline").info("-" * 80)
 
     def log_stage_end(self, stage_name: str, stage_number: int, success: bool = True, details: str = ""):
         """Log the end of a pipeline stage."""
         status = "COMPLETE" if success else "FAILED"
         logging.getLogger("pipeline").info("-" * 80)
-        logging.getLogger("pipeline").info(f"STAGE {stage_number}: {stage_name} - {status}")
+        logging.getLogger("pipeline").info("STAGE %d: %s - %s", stage_number, stage_name, status)
         if details:
-            logging.getLogger("pipeline").info(f"  {details}")
+            logging.getLogger("pipeline").info("  %s", details)
         logging.getLogger("pipeline").info("-" * 80)
 
     def log_worker_start(self, worker_type: str, worker_id: str, details: str = ""):
         """Log worker process start."""
-        logging.getLogger(f"pipeline.worker.{worker_type}").debug(f"Worker {worker_id} started - {details}")
+        logging.getLogger("pipeline.worker.%s" % worker_type).debug("Worker %s started - %s", worker_id, details)
 
     def log_worker_end(self, worker_type: str, worker_id: str, success: bool = True, details: str = ""):
         """Log worker process end."""
         if success:
-            logging.getLogger(f"pipeline.worker.{worker_type}").debug(f"Worker {worker_id} completed - {details}")
+            logging.getLogger("pipeline.worker.%s" % worker_type).debug("Worker %s completed - %s", worker_id, details)
         else:
-            logging.getLogger(f"pipeline.worker.{worker_type}").error(f"Worker {worker_id} failed - {details}")
+            logging.getLogger("pipeline.worker.%s" % worker_type).error("Worker %s failed - %s", worker_id, details)
 
     def log_exception(self, context: str, exc: Exception):
         """Log an exception with full traceback."""
+        logging.getLogger("pipeline").error("Exception in %s: %s: %s", context, type(exc).__name__, exc, exc_info=True)
         logging.getLogger("pipeline").error(
             "Exception in %s: %s: %s", context, type(exc).__name__, exc, exc_info=exc
         )
@@ -277,10 +278,9 @@ def configure_worker_logging(log_dir: str = "logs", log_level: str = "INFO", sup
         for h in root_logger.handlers:
             if isinstance(h, (logging.FileHandler, logging.handlers.RotatingFileHandler)):
                 h.setLevel(getattr(logging, (log_level or "INFO").upper(), logging.INFO))
-                if suppress_patterns:
-                    h.addFilter(ExcludePatternsFilter(list(suppress_patterns)))
-                else:
-                    h.addFilter(ExcludePatternsFilter(["[MONITOR]", "[PROGRESS]"]))
+                h.filters = [f for f in h.filters if not isinstance(f, ExcludePatternsFilter)]
+                patterns = list(suppress_patterns) if suppress_patterns else ["[MONITOR]", "[PROGRESS]"]
+                h.addFilter(ExcludePatternsFilter(patterns))
 
     # Root logger can remain at DEBUG; handlers decide emission
     root_logger.setLevel(logging.DEBUG)

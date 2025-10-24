@@ -25,6 +25,8 @@ dependencies = [
     "torchaudio<2.9.0",
     "torchcodec>=0.7.0",
     "deepfilternet",
+    "librosa",
+    "pydantic",
 ]
 
 [project.optional-dependencies]

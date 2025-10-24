@@ -130,15 +130,31 @@ multi_camera_composition:
 
   # Performance and encoding controls
   # single_pass_filter_complex: Compose in one ffmpeg invocation (faster, default true)
-  single_pass_filter_complex: false
+  # MPS OPTIMIZATION: Enabled for 5-10x faster composition on Apple Silicon
+  single_pass_filter_complex: true
   encoding:
     # MPS optimization: Use VideoToolbox hardware encoding on macOS for ~5-10x faster encoding
     # with excellent quality. Falls back to software if hardware encoder unavailable.
     use_hw_encode: true         # Enable hardware encoding on macOS (h264_videotoolbox)
     hw_codec: h264_videotoolbox # VideoToolbox for Apple Silicon/Intel Macs
+    
+    # MPS OPTIMIZATION: Use constant quality mode for better speed/quality tradeoff
+    # quality: 1-100 scale (higher = better quality)
+    #   - 50-60: Fast, good quality for previews
+    #   - 65-75: Excellent quality, recommended for final output
+    #   - 80+: Near-lossless, larger file sizes
+    # If not set, falls back to bitrate mode (below) for backward compatibility
+    quality: 70                 # Constant quality mode (FFmpeg 4.4+)
+    
+    # Legacy bitrate mode (used only if quality not set)
+    bitrate: 8000k              # VideoToolbox target: 8Mbps for excellent 1080p quality (up from 6Mbps)
+    
+    # Pixel format: yuv420p (compatible) or p010le (10-bit, newer Macs only)
+    pix_fmt: yuv420p           # Compatible pixel format for all devices
+    
+    # Software encoding fallback settings (rarely used when VideoToolbox available)
     x264_preset: null         # Software fallback: 'faster' balances speed/quality (upgrade from 'veryfast')
     x264_crf: null              # Software fallback: CRF 20 for higher quality (down from 22)
-    bitrate: 8000k              # VideoToolbox target: 8Mbps for excellent 1080p quality (up from 6Mbps)
 video_processing:
   crossfade_duration: 0.5
 transcription:
@@ -336,9 +352,10 @@ concurrency:
   transcription_workers: 2
 
   # Stage 5: Video merging and composition (I/O-bound, uses ffmpeg with VideoToolbox)
-  # Increased to 4 for parallel hardware encoding; VideoToolbox offloads to Media Engine
-  # Apple Silicon's dedicated video encoders can handle multiple streams efficiently
-  merge_workers: 1
+  # MPS OPTIMIZATION: Increased to 4 for parallel hardware encoding
+  # VideoToolbox offloads to Media Engine which can handle multiple streams efficiently
+  # Apple Silicon's dedicated video encoders can process 4+ compositions in parallel
+  merge_workers: 4
 
 # Logging configuration
 logging:
