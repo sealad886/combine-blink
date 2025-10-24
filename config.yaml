@@ -67,7 +67,7 @@ multi_camera_composition:
   audio_cleanup:
     enabled: true
     highpass_hz: 80         # kHz # Slightly lower for more natural bass (was 120)
-    lowpass_hz: 8000         # kHz # Extended to 8kHz for better clarity on speech (was 7000)
+    lowpass_hz: 4000         # kHz # Extended to 8kHz for better clarity on speech (was 7000)
     denoise: true            # Apply fft-based denoiser (afftdn)
     denoise_nf: -25.0        # Noise floor reference (dB) for denoiser
     loudness_normalize: true # Per-segment loudness normalization (loudnorm)
