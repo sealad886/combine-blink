@@ -149,7 +149,7 @@ python main.py <video_path>
 
 Run the fast unit tests to ensure no regressions:
 ```bash
-npm test  # or pytest tests/unit/
+pytest tests/unit/
 ```
 
 ## Rollback Instructions
