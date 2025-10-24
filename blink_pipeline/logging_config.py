@@ -13,6 +13,25 @@ from datetime import datetime
 from pathlib import Path
 
 
+class ExcludePatternsFilter(logging.Filter):
+    """Filter out records containing any of the given substrings, unless level >= ERROR."""
+    def __init__(self, patterns: list[str] | None = None, allow_errors: bool = True):
+        super().__init__()
+        self.patterns = patterns or []
+        self.allow_errors = allow_errors
+    def filter(self, record: logging.LogRecord) -> bool:
+        if self.allow_errors and record.levelno >= logging.ERROR:
+            return True
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return True
+        for p in self.patterns:
+            if p and p in msg:
+                return False
+        return True
+
+
 class PipelineLogger:
     """
     Configures comprehensive file-based logging for the pipeline.
@@ -23,19 +42,28 @@ class PipelineLogger:
     - pipeline_<timestamp>.log: Session-specific log (for archival)
     """
 
-    def __init__(self, log_dir: str = "logs", log_level: str = "INFO"):
+    def __init__(self, log_dir: str = "logs", log_level: str = "INFO", session_log_level: str | None = None, suppress_patterns: list[str] | None = None):
         """
         Initialize pipeline logging.
 
         Args:
             log_dir: Directory for log files
-            log_level: Minimum log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+            log_level: Minimum log level for main rotating log (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+            session_log_level: Level for the session log file; defaults to log_level
+            suppress_patterns: Substrings to suppress in file logs (e.g., ['[MONITOR]', '[PROGRESS]'])
         """
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(exist_ok=True)
 
-        # Convert log level string to logging constant
+        # Convert log level strings to logging constants
         self.log_level = getattr(logging, log_level.upper(), logging.INFO)
+        if isinstance(session_log_level, str):
+            self.session_log_level = getattr(logging, session_log_level.upper(), self.log_level)
+        else:
+            self.session_log_level = self.log_level
+
+        # Patterns to suppress in file logs (errors always pass)
+        self.suppress_patterns = list(suppress_patterns or ["[MONITOR]", "[PROGRESS]"])
 
         # Session identifier for archival logs
         self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -75,6 +103,9 @@ class PipelineLogger:
         )
         main_handler.setLevel(self.log_level)
         main_handler.setFormatter(detailed_formatter)
+        # Suppress chatty monitor/progress messages unless they are errors
+        if self.suppress_patterns:
+            main_handler.addFilter(ExcludePatternsFilter(self.suppress_patterns))
         root_logger.addHandler(main_handler)
 
         # 2. Error log file (rotating, keeps last 5 files of 5MB each)
@@ -95,8 +126,10 @@ class PipelineLogger:
             session_log_path,
             encoding='utf-8'
         )
-        session_handler.setLevel(logging.DEBUG)  # Capture everything for this session
+        session_handler.setLevel(self.session_log_level)
         session_handler.setFormatter(detailed_formatter)
+        if self.suppress_patterns:
+            session_handler.addFilter(ExcludePatternsFilter(self.suppress_patterns))
         root_logger.addHandler(session_handler)
 
         # 4. Console handler (optional, minimal output to not interfere with Rich)
@@ -182,11 +215,19 @@ def setup_pipeline_logging(config: dict) -> PipelineLogger:
         PipelineLogger instance
     """
     # Get log directory from config or use default
-    log_dir = config.get('logging', {}).get('log_dir', 'logs')
-    log_level = config.get('logging', {}).get('log_level', 'INFO')
+    log_cfg = config.get('logging', {}) or {}
+    log_dir = log_cfg.get('log_dir', 'logs')
+    log_level = log_cfg.get('log_level', 'INFO')
+    session_log_level = log_cfg.get('session_log_level', log_level)
+    suppress_patterns = log_cfg.get('suppress_patterns', ["[MONITOR]", "[PROGRESS]"])
 
     # Create and configure logger
-    pipeline_logger = PipelineLogger(log_dir=log_dir, log_level=log_level)
+    pipeline_logger = PipelineLogger(
+        log_dir=log_dir,
+        log_level=log_level,
+        session_log_level=session_log_level,
+        suppress_patterns=suppress_patterns,
+    )
 
     # Log session start
     pipeline_logger.log_session_start(config)
@@ -194,7 +235,7 @@ def setup_pipeline_logging(config: dict) -> PipelineLogger:
     return pipeline_logger
 
 
-def configure_worker_logging(log_dir: str = "logs"):
+def configure_worker_logging(log_dir: str = "logs", log_level: str = "INFO", suppress_patterns: list[str] | None = None):
     """
     Configure logging for worker processes.
 
@@ -203,6 +244,8 @@ def configure_worker_logging(log_dir: str = "logs"):
 
     Args:
         log_dir: Directory for log files
+        log_level: Minimum log level for worker file handler
+        suppress_patterns: Substrings to suppress (e.g., ['[MONITOR]', '[PROGRESS]']); errors always pass
     """
     # Get or create root logger
     root_logger = logging.getLogger()
@@ -212,16 +255,30 @@ def configure_worker_logging(log_dir: str = "logs"):
 
     # Ensure we have file handlers
     if not any(isinstance(h, (logging.FileHandler, logging.handlers.RotatingFileHandler)) for h in root_logger.handlers):
-        # Add file handlers if they don't exist
+        # Add file handler if it doesn't exist
         log_path = Path(log_dir) / "pipeline.log"
         file_handler = logging.FileHandler(log_path, encoding='utf-8')
-        file_handler.setLevel(logging.DEBUG)
+        file_handler.setLevel(getattr(logging, (log_level or "INFO").upper(), logging.INFO))
         formatter = logging.Formatter(
             fmt='%(asctime)s | %(levelname)-8s | %(processName)-12s | %(name)s | %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S'
         )
         file_handler.setFormatter(formatter)
+        if suppress_patterns:
+            file_handler.addFilter(ExcludePatternsFilter(list(suppress_patterns)))
+        else:
+            # Default suppression for chatty monitor/progress lines
+            file_handler.addFilter(ExcludePatternsFilter(["[MONITOR]", "[PROGRESS]"]))
         root_logger.addHandler(file_handler)
+    else:
+        # Update existing file handlers to respect level and filters
+        for h in root_logger.handlers:
+            if isinstance(h, (logging.FileHandler, logging.handlers.RotatingFileHandler)):
+                h.setLevel(getattr(logging, (log_level or "INFO").upper(), logging.INFO))
+                if suppress_patterns:
+                    h.addFilter(ExcludePatternsFilter(list(suppress_patterns)))
+                else:
+                    h.addFilter(ExcludePatternsFilter(["[MONITOR]", "[PROGRESS]"]))
 
-    # Set level to DEBUG to capture everything
+    # Root logger can remain at DEBUG; handlers decide emission
     root_logger.setLevel(logging.DEBUG)

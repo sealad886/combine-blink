@@ -57,7 +57,7 @@ STAGE_DEFINITIONS = [
     (StageKey.SPEAKER_ID, "Speaker Identification"),
     (StageKey.MERGE, "Video Merging/Composition"),
     (StageKey.FINAL_TRANSCRIPTION, "Final Video Transcription"),
-    ("speaker_profiles", "Speaker Profiles Export"),  # TODO: Add to StageKey enum if needed
+    (StageKey.SPEAKER_PROFILES, "Speaker Profiles Export"),
 ]
 
 
@@ -88,11 +88,11 @@ class PipelineDashboard:
         # Stage tracking (single source of truth from STAGE_DEFINITIONS)
         self.stages: dict[str, StageInfo] = {}
         for key, name in STAGE_DEFINITIONS:
-            if key == "validation":
+            if key == StageKey.VALIDATION:
                 total = total_videos
-            elif key in ("transcription", "speaker_id", "merge", "final_transcription"):
+            elif key in (StageKey.TRANSCRIPTION, StageKey.SPEAKER_ID, StageKey.MERGE, StageKey.FINAL_TRANSCRIPTION):
                 total = total_groups
-            elif key == "speaker_profiles":
+            elif key == StageKey.SPEAKER_PROFILES:
                 total = 0
             else:
                 total = 0

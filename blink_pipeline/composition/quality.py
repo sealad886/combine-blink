@@ -18,7 +18,7 @@ import logging
 import re
 import subprocess
 from pathlib import Path
-from typing import Protocol
+from typing import Dict, List, Optional, Protocol
 
 from .models import QualityMetrics, QualityScore
 
@@ -30,7 +30,7 @@ class QualityAnalyzer(Protocol):
         """Analyze audio quality for a video file."""
         ...
 
-    def score(self, metrics: QualityMetrics, weights: dict[str, float]) -> QualityScore:
+    def score(self, metrics: QualityMetrics, weights: Dict[str, float]) -> QualityScore:
         """Calculate weighted quality score from metrics."""
         ...
 
@@ -72,6 +72,7 @@ class FFmpegAudioQualityAnalyzer:
         try:
             command = [
                 'ffmpeg',
+                '-nostdin', '-hide_banner', '-loglevel', 'error',
                 '-i', str(video_path),
                 '-af', 'astats=metadata=1:reset=1',
                 '-f', 'null',
@@ -82,7 +83,8 @@ class FFmpegAudioQualityAnalyzer:
                 command,
                 capture_output=True,
                 text=True,
-                timeout=self.timeout
+                timeout=self.timeout,
+                stdin=subprocess.DEVNULL
             )
 
             stderr_output = result.stderr or ''
@@ -116,10 +118,10 @@ class FFmpegAudioQualityAnalyzer:
         Returns:
             QualityMetrics with parsed values
         """
-        rms_levels: list[float] = []
-        rms_min_levels: list[float] = []
-        peak_levels: list[float] = []
-        peak_counts: list[float] = []
+        rms_levels: List[float] = []
+        rms_min_levels: List[float] = []
+        peak_levels: List[float] = []
+        peak_counts: List[float] = []
 
         for line in stderr.splitlines():
             line = line.strip()
@@ -168,7 +170,7 @@ class FFmpegAudioQualityAnalyzer:
         )
 
     @staticmethod
-    def _extract_trailing_number(value: str) -> float | None:
+    def _extract_trailing_number(value: str) -> Optional[float]:
         """Extract the last number from a string."""
         matches = re.findall(r"-?\d+(?:\.\d+)?", value)
         if not matches:
@@ -190,7 +192,7 @@ class FFmpegAudioQualityAnalyzer:
             snr_db=20.0
         )
 
-    def score(self, metrics: QualityMetrics, weights: dict[str, float]) -> QualityScore:
+    def score(self, metrics: QualityMetrics, weights: Dict[str, float]) -> QualityScore:
         """
         Calculate weighted quality score from metrics.
 
@@ -270,7 +272,7 @@ class FFmpegAudioQualityAnalyzer:
 class CachedQualityAnalyzer:
     """Wrapper that caches quality analysis results to disk."""
 
-    def __init__(self, analyzer: QualityAnalyzer, cache_dir: Path | None = None):
+    def __init__(self, analyzer: QualityAnalyzer, cache_dir: Optional[Path] = None):
         """
         Initialize with base analyzer and optional cache directory.
 
@@ -336,7 +338,7 @@ class CachedQualityAnalyzer:
 
         return metrics
 
-    def score(self, metrics: QualityMetrics, weights: dict[str, float]) -> QualityScore:
+    def score(self, metrics: QualityMetrics, weights: Dict[str, float]) -> QualityScore:
         """Calculate score (delegates to base analyzer)."""
         return self.analyzer.score(metrics, weights)
 

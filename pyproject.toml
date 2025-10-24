@@ -24,6 +24,7 @@ dependencies = [
     "torch<2.9.0",
     "torchaudio<2.9.0",
     "torchcodec>=0.7.0",
+    "deepfilternet",
 ]
 
 [project.optional-dependencies]
@@ -37,6 +38,9 @@ vision = [
     "pyobjc-core>=9.2",
     "pyobjc-framework-Vision>=9.2",
     "pyobjc-framework-Quartz>=9.2",
+    "ane_transformers",
+    "coremltools",
+    "openai-whisper",
 ]
 
 [project.scripts]

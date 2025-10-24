@@ -12,7 +12,7 @@ terminal output.
 - Configures the root logger with the following handlers:
   1. **Rotating main log** — `pipeline.log`, max 10 MB × 10 files, level = configured `log_level`.
   2. **Rotating errors** — `pipeline_errors.log`, max 5 MB × 5 files, level = `ERROR`.
-  3. **Session log** — `pipeline_{timestamp}.log`, captures everything at `DEBUG` for a single run.
+  3. **Session log** — `pipeline_{timestamp}.log`, level = configured `session_log_level` (default `INFO`) for a single run.
 - Optionally a console handler can be enabled for warnings/errors (disabled by
   default to keep the terminal clean while Rich is active).
 
@@ -26,7 +26,7 @@ Each worker process calls `configure_worker_logging(log_dir)`:
 
 - Removes console handlers (Rich already owns stderr).
 - Ensures at least one file handler is attached (reusing the main log).
-- Sets level to `DEBUG` so per-worker info is captured.
+- Sets level to `INFO` by default (configurable) and suppresses chatty `[PROGRESS]`/`[MONITOR]` lines.
 
 Worker loggers use namespaces like `pipeline.transcription` and `pipeline.merge`
 for clarity.
@@ -50,11 +50,16 @@ Components:
 ```yaml
 logging:
   log_dir: logs
-  log_level: INFO  # DEBUG/INFO/WARNING/ERROR/CRITICAL
+  log_level: INFO           # DEBUG/INFO/WARNING/ERROR/CRITICAL (main rotating log)
+  session_log_level: INFO   # Per-run session log level; defaults to log_level
+  suppress_patterns:        # Suppress non-error lines containing these substrings
+    - "[MONITOR]"
+    - "[PROGRESS]"
 ```
 
-Changing `log_level` affects the main rotating log. Error and session handlers
-retain their defaults regardless.
+- `log_level` affects the main rotating log (`pipeline.log`).
+- `session_log_level` controls the per-run archival log; default is `INFO`.
+- `suppress_patterns` drops matching records from file logs unless they are errors.
 
 ## Usage Tips
 

@@ -38,6 +38,7 @@ class StageKey(str, Enum):
     MERGE = "merge"
     FINAL_TRANSCRIPTION = "final_transcription"
     COMPOSITION = "composition"
+    SPEAKER_PROFILES = "speaker_profiles"
 
     def __str__(self) -> str:
         """Return the string value for seamless string compatibility."""

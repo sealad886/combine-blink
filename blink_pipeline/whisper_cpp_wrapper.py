@@ -41,7 +41,7 @@ class WhisperCppWrapper:
         self.model_path = Path(model_path)
 
         # Handle Core ML models (.mlpackage -> .mlmodelc compilation)
-        if str(model_path).endswith('.mlpackage'):
+        if str(model_path).endswith('.mlpackage') or str(model_path).endswith('.mlmodelc'):
             self.model_path = self._compile_mlpackage_if_needed(self.model_path)
 
         if not self.model_path.exists():

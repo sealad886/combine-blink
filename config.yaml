@@ -187,7 +187,7 @@ transcription:
     # For non-Core ML (CPU/GPU/Metal):
     #   ggml_model_path: /path/to/whisper.cpp/models/ggml-medium.en.bin  # Standard GGML model
     #   device: auto  # or cpu, cuda, metal
-    ggml_model_path: /Users/andrew/zzCoding-play/whisper.cpp/models/models/coreml-encoder-large-v3-turbo.mlmodelc
+    ggml_model_path: /Users/andrew/zzCoding-play/whisper.cpp/models/ggml-large-v3-turbo.bin
 
     # Path to whisper.cpp binary (auto-detected if in PATH or standard locations)
     # Leave commented out for auto-detection, or specify explicit path:
@@ -209,6 +209,107 @@ transcription:
     - HF_TOKEN
     - HUGGINGFACE_TOKEN
     min_overlap_ratio: 0.6
+
+# Audio Enhancement (Stage 3 - Pre-Transcription)
+# Advanced neural network-based audio enhancement applied before transcription
+# to improve speech recognition accuracy in noisy environments.
+#
+# This is separate from audio_cleanup (Stage 5) which handles composition audio.
+# Enhancement happens once per clip before transcription and is cached.
+audio_enhancement:
+  # Master enable/disable switch
+  # Set to false to skip all audio enhancement (faster, lower quality transcription)
+  enabled: true
+
+  # Cache directory for enhanced audio files
+  # Enhanced audio is cached to avoid reprocessing on subsequent runs
+  # Cache is invalidated when configuration changes
+  cache_dir: output/enhanced_audio_cache
+
+  # DeepFilterNet Settings
+  # Neural network-based noise reduction for speech enhancement
+  # Uses deep learning to remove background noise while preserving speech
+  deepfilternet:
+    # Enable DeepFilterNet denoising
+    enabled: true
+
+    # Model selection: DeepFilterNet, DeepFilterNet2, DeepFilterNet3
+    # - DeepFilterNet: Original model, fastest, good quality
+    # - DeepFilterNet2: Improved model, balanced speed/quality
+    # - DeepFilterNet3: Latest model, best quality, slightly slower
+    # Recommended: DeepFilterNet3 for best results
+    model: DeepFilterNet3
+
+    # Post-filter: Additional noise attenuation stage
+    # Provides extra noise reduction but may affect speech naturalness
+    # Recommended: false for natural sound, true for maximum noise reduction
+    post_filter: false
+
+    # Post-filter beta (0.0-0.05): Aggressiveness of post-filter
+    # Only used if post_filter is enabled
+    # Higher = more aggressive noise reduction (may affect speech quality)
+    # Lower = more natural sound but less noise reduction
+    # Recommended: 0.02 for balanced results
+    pf_beta: 0.02
+
+    # Attenuation limit in dB (0-100)
+    # Controls how much noise can be reduced
+    # Lower values preserve more of the original signal
+    # 10 = conservative (preserve speech naturalness)
+    # 50 = moderate (balanced)
+    # 100 = full attenuation (maximum noise reduction, may affect speech)
+    # Recommended: 10 for speech transcription to preserve quality
+    atten_lim_db: 10
+
+    # Minimum processing threshold in dB (-15 to 35)
+    # Audio below this level is not processed by DeepFilterNet
+    # Useful to skip very quiet sections or noise floor
+    # Recommended: -10.0 for typical speech scenarios
+    min_thresh: -10.0
+
+    # Maximum ERB buffer threshold in dB (-15 to 35)
+    # Advanced parameter controlling ERB (Equivalent Rectangular Bandwidth) processing
+    # Higher values allow more frequency content through
+    # Recommended: 30.0 (default, rarely needs adjustment)
+    max_erb_thresh: 30.0
+
+    # Maximum deep filtering threshold in dB (-15 to 35)
+    # Advanced parameter controlling deep filtering stage intensity
+    # Higher values = less aggressive filtering
+    # Recommended: 20.0 (default, rarely needs adjustment)
+    max_df_thresh: 20.0
+
+  # VAD-based Pregain Normalization
+  # Uses Voice Activity Detection (Silero VAD) to identify and normalize speech
+  # Analyzes only speech segments to calculate optimal gain, avoiding noise amplification
+  # Applied BEFORE DeepFilterNet to ensure speech is at optimal level for denoising
+  vad_pregain:
+    # Enable VAD-based pregain normalization
+    # Highly recommended for noisy or quiet audio
+    enabled: true
+
+    # Target RMS level (0.0-1.0) for speech segments
+    # Controls how loud the speech should be after normalization
+    # 0.9 = high level for clear, strong speech (recommended for noisy environments)
+    # 0.5 = moderate level for balanced dynamics
+    # 0.2-0.3 = lower level for natural dynamics (good for already clean audio)
+    #
+    # Higher values improve DeepFilterNet performance but may reduce dynamics
+    # Recommended: 0.9 for noisy Blink camera audio
+    target_rms: 0.9
+
+    # VAD probability threshold (0.0-1.0)
+    # Controls how strict the Voice Activity Detection is
+    # Higher = stricter speech detection (fewer false positives, may miss quiet speech)
+    # Lower = more permissive (catches quieter speech, may include noise)
+    #
+    # 0.05 = very permissive (good for quiet speakers or distant audio)
+    # 0.5 = balanced (good default for most scenarios)
+    # 0.8 = strict (only very clear speech detected)
+    #
+    # Recommended: 0.05 for Blink camera audio (often has quiet speech)
+    vad_threshold: 0.05
+
 speaker_identification:
   embedding_model_id: pyannote/wespeaker-voxceleb-resnet34-LM
   auth_token_env:

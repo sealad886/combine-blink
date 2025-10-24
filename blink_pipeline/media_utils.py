@@ -38,6 +38,7 @@ def probe_media_info(path: str) -> MediaInfo:
                 "ffprobe",
                 "-v",
                 "error",
+                "-hide_banner",
                 "-print_format",
                 "json",
                 "-show_format",
@@ -47,6 +48,7 @@ def probe_media_info(path: str) -> MediaInfo:
             capture_output=True,
             text=True,
             check=True,
+            stdin=subprocess.DEVNULL,
         )
         payload = json.loads(result.stdout) if result.stdout else {}
         fmt = payload.get("format", {})
@@ -78,8 +80,16 @@ def probe_media_info(path: str) -> MediaInfo:
             video_duration=video_duration or duration or 0.0,
             audio_duration=audio_duration or duration or 0.0
         )
-    except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
-        logging.error("ffprobe failed for %s: %s", path, exc)
+    except subprocess.CalledProcessError as exc:
+        # Surface stderr when available to aid diagnosis (e.g., unsupported flags)
+        err = getattr(exc, 'stderr', None)
+        if err:
+            logging.error("ffprobe failed for %s: %s", path, err.strip())
+        else:
+            logging.error("ffprobe failed for %s: %s", path, exc)
+        return MediaInfo()
+    except json.JSONDecodeError as exc:
+        logging.error("ffprobe produced invalid JSON for %s: %s", path, exc)
         return MediaInfo()
 
 
@@ -150,6 +160,7 @@ def repair_video(video_path: str, output_path: str, cache_dir: str | None = None
     command = [
         "ffmpeg",
         "-y",
+        "-nostdin",
         "-loglevel", "error",
         "-err_detect", "ignore_err",
         "-i", video_path,
@@ -202,7 +213,7 @@ def repair_video(video_path: str, output_path: str, cache_dir: str | None = None
     ])
 
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=300)
+        result = subprocess.run(command, capture_output=True, text=True, timeout=300, stdin=subprocess.DEVNULL)
         if result.returncode != 0:
             logging.error(f"ffmpeg repair failed for {video_path} (strategy: {strategy})")
             if result.stderr:
@@ -242,6 +253,8 @@ def extract_audio_segment(
     """Extract a portion of audio to WAV using ffmpeg to avoid buffering media in RAM."""
 
     command = ["ffmpeg", "-y", "-loglevel", "error"]
+    # Avoid any chance of interactive wait
+    command.insert(2, "-nostdin")
     if start is not None:
         command.extend(["-ss", f"{start:.3f}"])
     if end is not None:
@@ -260,7 +273,7 @@ def extract_audio_segment(
             output_path,
         ]
     )
-    result = subprocess.run(command, capture_output=True)
+    result = subprocess.run(command, capture_output=True, stdin=subprocess.DEVNULL)
     if result.returncode != 0:
         logging.error("ffmpeg failed to extract audio segment from %s", video_path)
         return False

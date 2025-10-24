@@ -15,7 +15,7 @@ Classes:
 Author: Phase 1 implementation
 """
 
-from typing import Any
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -58,8 +58,8 @@ class PeopleDetectionConfig(BaseModel):
     sample_frames: int = Field(default=12, gt=0, description="Number of frames to sample")
     resize_width: int = Field(default=480, gt=0, description="Resize width for detection")
     min_frame_width: int = Field(default=320, gt=0, description="Minimum frame width")
-    model_name: str | None = Field(default='hustvl/yolos-tiny', description="HuggingFace model name")
-    revision: str | None = Field(default=None, description="Model revision")
+    model_name: Optional[str] = Field(default='hustvl/yolos-tiny', description="HuggingFace model name")
+    revision: Optional[str] = Field(default=None, description="Model revision")
     score_threshold: float = Field(default=0.65, ge=0.0, le=1.0, description="Detection confidence threshold")
     min_count: int = Field(default=1, ge=0, description="Minimum people count for selection")
 
@@ -80,8 +80,8 @@ class EncodingConfig(BaseModel):
 
     use_hw_encode: bool = Field(default=True, description="Use hardware encoding")
     hw_codec: str = Field(default='h264_videotoolbox', description="Hardware codec")
-    x264_preset: str | None = Field(default=None, description="Software encoding preset")
-    x264_crf: int | None = Field(default=None, ge=0, le=51, description="Software encoding CRF")
+    x264_preset: Optional[str] = Field(default=None, description="Software encoding preset")
+    x264_crf: Optional[int] = Field(default=None, ge=0, le=51, description="Software encoding CRF")
     bitrate: str = Field(default='8000k', description="Target bitrate")
 
 
@@ -97,7 +97,25 @@ class AudioCleanupConfig(BaseModel):
     loudnorm_target_i: float = Field(default=-23.0, description="Target integrated loudness (LUFS)")
     loudnorm_target_tp: float = Field(default=-2.0, description="Target true peak (dBTP)")
     loudnorm_target_lra: float = Field(default=11.0, description="Target loudness range (LU)")
-    extra_filters: list[str] = Field(default_factory=list, description="Additional FFmpeg filters")
+    extra_filters: List[str] = Field(default_factory=list, description="Additional FFmpeg filters")
+
+
+class AudioMixConfig(BaseModel):
+    """Configuration for audio mixing and transitions (crossfades, ducking)."""
+
+    # Crossfade parameters between consecutive audio segments
+    crossfade_seconds: float = Field(default=0.06, ge=0.0, description="Crossfade duration in seconds")
+    curve1: str = Field(default='tri', description="Acrossfade curve for outgoing segment (afade curve names)")
+    curve2: str = Field(default='tri', description="Acrossfade curve for incoming segment (afade curve names)")
+    overlap: bool = Field(default=True, description="Whether to overlap segment ends during crossfade")
+
+    # Optional ducking (reserved for future use)
+    ducking_enabled: bool = Field(default=False, description="Enable sidechain ducking (not yet implemented)")
+    ducking_threshold: float = Field(default=0.125, ge=0.0, description="Sidechain threshold for ducking")
+    ducking_ratio: float = Field(default=2.0, ge=1.0, description="Compression ratio for ducking")
+    ducking_attack_ms: float = Field(default=20.0, ge=0.01, description="Attack time in ms for ducking")
+    ducking_release_ms: float = Field(default=250.0, ge=0.01, description="Release time in ms for ducking")
+    ducking_makeup: float = Field(default=1.0, ge=1.0, description="Makeup gain for ducked signal")
 
 
 class CompositionConfig(BaseModel):
@@ -109,7 +127,7 @@ class CompositionConfig(BaseModel):
     switching_interval: float = Field(default=5.0, gt=0.0, description="Switching interval (seconds)")
     transition_style: str = Field(default='cut', description="Transition style (cut, crossfade)")
     transition_duration: float = Field(default=0.28, ge=0.0, description="Transition duration (seconds)")
-    audio_crossfade_seconds: float = Field(default=0.06, ge=0.0, description="Audio crossfade duration")
+    audio_crossfade_seconds: float = Field(default=0.06, ge=0.0, description="Audio crossfade duration (deprecated; use audio_mix.crossfade_seconds)")
     audio_source: str = Field(default='best_quality', description="Audio source selection strategy")
     single_pass_filter_complex: bool = Field(default=False, description="Use single-pass rendering")
 
@@ -120,6 +138,7 @@ class CompositionConfig(BaseModel):
     timestamp_overlay: TimestampOverlayConfig = Field(default_factory=TimestampOverlayConfig)
     encoding: EncodingConfig = Field(default_factory=EncodingConfig)
     audio_cleanup: AudioCleanupConfig = Field(default_factory=AudioCleanupConfig)
+    audio_mix: AudioMixConfig = Field(default_factory=AudioMixConfig)
 
     @field_validator('switching_strategy')
     @classmethod
@@ -146,9 +165,22 @@ class CompositionConfig(BaseModel):
         return v
 
     @classmethod
-    def from_dict(cls, config_dict: dict[str, Any]) -> 'CompositionConfig':
+    def from_dict(cls, config_dict: Dict[str, Any]) -> 'CompositionConfig':
         """Create CompositionConfig from dictionary (e.g., from YAML)."""
-        return cls(**config_dict)
+        # Backward-compat shim: if top-level audio_crossfade_seconds provided and
+        # audio_mix.crossfade_seconds not provided, propagate value.
+        cfg = dict(config_dict)
+        mix = dict(cfg.get('audio_mix') or {})
+        if 'audio_crossfade_seconds' in cfg and 'crossfade_seconds' not in mix:
+            try:
+                v = float(cfg.get('audio_crossfade_seconds'))
+                if v >= 0.0:
+                    mix['crossfade_seconds'] = v
+            except (TypeError, ValueError):
+                pass
+        if mix:
+            cfg['audio_mix'] = mix
+        return cls(**cfg)
 
 
 # Placeholder for future expansion
@@ -159,5 +191,6 @@ __all__ = [
     'TimestampOverlayConfig',
     'EncodingConfig',
     'AudioCleanupConfig',
+    'AudioMixConfig',
     'CompositionConfig',
 ]

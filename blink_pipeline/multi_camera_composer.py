@@ -33,6 +33,15 @@ from blink_pipeline.composition.alignment import (
     AlignmentConfig,
     CachedAlignmentEngine,
 )
+# Modular composition imports (Phase 3)
+from blink_pipeline.composition.timeline import (
+    TimelineGenerator,
+    CameraClip as ModularCameraClip,
+    SpeechSegment,
+)
+from blink_pipeline.composition.config import CompositionConfig, AudioMixConfig, TimestampOverlayConfig
+from blink_pipeline.composition.audio import AudioProcessor
+from blink_pipeline.composition.overlay import OverlayGenerator
 from blink_pipeline.media_utils import probe_media_info
 from blink_pipeline.people_detection import PeopleDetector, PeopleDetectorConfig
 
@@ -103,10 +112,18 @@ class MultiCameraComposer:
                 cache_dir=quality_cache_dir
             )
 
+            # Create timeline generator (Phase 3)
+            comp_config = CompositionConfig.from_dict(self.composition_config)
+            self._timeline_generator = TimelineGenerator(
+                comp_config,
+                people_detector=self._get_people_count_for_timeline
+            )
+
             logging.info("✅ Modular composition enabled - using blink_pipeline.composition modules")
         else:
             self._modular_quality_analyzer = None
             self._modular_alignment_engine = None
+            self._timeline_generator = None
             # Emit explicit debug log to satisfy legacy quality logging expectations
             logging.debug("Using legacy quality analysis (legacy composition implementation active)")
 
@@ -221,6 +238,20 @@ class MultiCameraComposer:
         self._overlay_margin_v: int = int(self.overlay_config.get('margin_v', 20))
         self._overlay_margin_r: int = int(self.overlay_config.get('margin_r', 20))
         self._overlay_dst_hours: int = int(self.overlay_config.get('dst_offset_hours', 1))
+        # Centralized overlay generator (ASS subtitles)
+        try:
+            _ts_cfg = TimestampOverlayConfig(
+                enabled=self._overlay_enabled,
+                font=self._overlay_font,
+                font_size=self._overlay_font_size,
+                margin_v=self._overlay_margin_v,
+                margin_r=self._overlay_margin_r,
+                dst_offset_hours=self._overlay_dst_hours,
+            )
+        except Exception:
+            # Fallback to defaults if config dict is malformed
+            _ts_cfg = TimestampOverlayConfig()
+        self._overlay_generator = OverlayGenerator(_ts_cfg)
 
         cleanup_defaults = {
             'enabled': True,
@@ -279,6 +310,39 @@ class MultiCameraComposer:
         self._has_speech_data: bool = False
         # Audio stitching improvements
         self._audio_crossfade_s: float = float(self.composition_config.get('audio_crossfade_seconds', 0.06))
+        # Audio mix options (curves, overlap) with backward-compat support
+        _mix_cfg = self.composition_config.get('audio_mix', {}) or {}
+        self._audio_curve1: str = str(_mix_cfg.get('curve1', 'tri')).lower()
+        self._audio_curve2: str = str(_mix_cfg.get('curve2', 'tri')).lower()
+        _valid_curves = {
+            'tri','qsin','hsin','esin','log','ipar','qua','cub','squ','cbr','par','exp',
+            'iqsin','ihsin','dese','desi','losi','sinc','isinc','quat','quatr','qsin2','hsin2','nofade'
+        }
+        if self._audio_curve1 not in _valid_curves:
+            self._audio_curve1 = 'tri'
+        if self._audio_curve2 not in _valid_curves:
+            self._audio_curve2 = 'tri'
+        # If nested crossfade is present, prefer it over deprecated top-level seconds
+        try:
+            _xf = _mix_cfg.get('crossfade_seconds', None)
+            if _xf is not None:
+                self._audio_crossfade_s = float(_xf)
+        except (TypeError, ValueError):
+            pass
+        self._audio_overlap: bool = bool(_mix_cfg.get('overlap', True))
+        # Ducking configuration (optional)
+        self._ducking_enabled: bool = bool(_mix_cfg.get('ducking_enabled', False))
+        def _get_mix_float(key: str, default: float) -> float:
+            try:
+                v = _mix_cfg.get(key, default)
+                return float(v)
+            except (TypeError, ValueError):
+                return default
+        self._ducking_threshold: float = _get_mix_float('ducking_threshold', 0.125)
+        self._ducking_ratio: float = _get_mix_float('ducking_ratio', 2.0)
+        self._ducking_attack_ms: float = _get_mix_float('ducking_attack_ms', 20.0)
+        self._ducking_release_ms: float = _get_mix_float('ducking_release_ms', 250.0)
+        self._ducking_makeup: float = _get_mix_float('ducking_makeup', 1.0)
 
         # Encoding/IO performance options
         enc_cfg = self.composition_config.get('encoding', {})
@@ -414,7 +478,13 @@ class MultiCameraComposer:
             _report_progress(int(total_steps * 0.3))
 
             # Step 2: Generate overlap-aligned timelines for video and audio across the full event (10% of work)
-            video_timeline, audio_timeline = self._generate_aligned_timelines(camera_clips)
+            if self._use_modular_composition and self._timeline_generator:
+                # Use modular timeline generation (Phase 3)
+                video_timeline, audio_timeline = self._generate_timelines_modular(camera_clips)
+            else:
+                # Use legacy timeline generation
+                video_timeline, audio_timeline = self._generate_aligned_timelines(camera_clips)
+
             self._review_segments = self._extract_review_segments(video_timeline)
             _report_progress(int(total_steps * 0.4))
 
@@ -453,134 +523,34 @@ class MultiCameraComposer:
         self._event_start = event_start
 
         for clip in video_clips:
-            # Get clip metadata
             media_info = probe_media_info(clip['path'])
-
             if media_info.duration <= 0:
-                logging.warning(f"Skipping clip with invalid duration: {clip['path']}")
+                logging.warning("Skipping clip with invalid duration: %s", clip['path'])
                 continue
 
-            # Calculate relative start time
+            # Relative start time of this clip within the event
             start_offset = (clip['datetime'] - event_start).total_seconds()
 
             # Analyze audio quality only if needed for strategy
             if self._needs_audio_analysis:
                 audio_score = self._calculate_audio_quality(clip['path'], media_info)
             else:
-                # Use neutral default score when not needed
-                audio_score = 0.5
+                audio_score = 0.5  # neutral default when not used
 
-            # Video quality can be added later (for now use placeholder)
-            video_score = 1.0
-
-            # People detection is deferred to composition phase; preserve upstream metadata only
-            people_count = float(clip.get('people_count') or 0.0)
-
-            camera_clips.append(CameraClip(
-                path=clip['path'],
-                camera=clip['camera'],
-                start_time=start_offset,
-                duration=media_info.duration,
-                audio_quality_score=audio_score,
-                video_quality_score=video_score,
-                people_count=people_count,
-            ))
-
-        return sorted(camera_clips, key=lambda x: x.start_time)
-
-    def _estimate_alignment_offsets(self, camera_clips: list[CameraClip]) -> dict[str, float]:
-        """
-        Estimate per-camera fine alignment offsets using cross-correlation on audio.
-
-        Returns a mapping camera -> offset_seconds where positive means the camera lags (behind)
-        the reference and should be shifted later (we add to start_time).
-        """
-        if not camera_clips:
-            return {}
-
-        # Use the best audio clip as reference
-        ref_clip = max(camera_clips, key=lambda x: x.audio_quality_score)
-        ref_cam = ref_clip.camera
-
-        # Build per-camera representative clip overlapping with reference
-        offsets: dict[str, float] = {ref_cam: 0.0}
-
-        for cam in sorted({c.camera for c in camera_clips}):
-            if cam == ref_cam:
-                continue
-            # choose the first clip from this camera that overlaps ref_clip by at least 5 seconds
-            candidates = [c for c in camera_clips if c.camera == cam]
-            best = None
-            best_overlap = 0.0
-            ref_start = ref_clip.start_time
-            ref_end = ref_clip.start_time + ref_clip.duration
-            for c in candidates:
-                c_start = c.start_time
-                c_end = c.start_time + c.duration
-                overlap = max(0.0, min(ref_end, c_end) - max(ref_start, c_start))
-                if overlap > best_overlap:
-                    best_overlap = overlap
-                    best = c
-            if not best or best_overlap < 5.0:
-                # Not enough overlap to estimate reliably
-                offsets[cam] = 0.0
-                continue
-
-            # Define analysis window within the overlap
-            start_in_event = max(ref_start, best.start_time)
-            # Center the window at the start of overlap to avoid clip ends
-            win = min(self._alignment_window, best_overlap)
-            if win <= 0.0:
-                offsets[cam] = 0.0
-                continue
-
-            # Compute source positions
-            ref_src_start = max(0.0, start_in_event - ref_clip.start_time)
-            cam_src_start = max(0.0, start_in_event - best.start_time)
-
-            # Extract audio samples
-            ref_samples = self._extract_audio_segment(
-                ref_clip.path, ref_src_start, win,
-                sr=self._alignment_sr,
-                bandpass=self._alignment_bandpass,
-                hp=self._alignment_hp, lp=self._alignment_lp,
-            )
-            cam_samples = self._extract_audio_segment(
-                best.path, cam_src_start, win,
-                sr=self._alignment_sr,
-                bandpass=self._alignment_bandpass,
-                hp=self._alignment_hp, lp=self._alignment_lp,
+            # Video quality and people_count can be added later; use placeholders
+            camera_clips.append(
+                CameraClip(
+                    path=clip['path'],
+                    camera=clip['camera'],
+                    start_time=start_offset,
+                    duration=media_info.duration,
+                    audio_quality_score=audio_score,
+                    video_quality_score=0.0,
+                    people_count=0.0,
+                )
             )
 
-            # Sanity check
-            if ref_samples.size == 0 or cam_samples.size == 0:
-                offsets[cam] = 0.0
-                continue
-
-            # Normalize
-            ref_samples = ref_samples - np.mean(ref_samples)
-            cam_samples = cam_samples - np.mean(cam_samples)
-            ref_energy = np.linalg.norm(ref_samples)
-            cam_energy = np.linalg.norm(cam_samples)
-            if ref_energy == 0 or cam_energy == 0:
-                offsets[cam] = 0.0
-                continue
-            ref_samples /= ref_energy
-            cam_samples /= cam_energy
-
-            # Cross-correlation (full)
-            corr = np.correlate(cam_samples, ref_samples, mode='full')
-            # lag index relative to ref: index of max - (N-1)
-            n = ref_samples.shape[0]
-            lag_idx = int(np.argmax(corr) - (n - 1))
-            lag_seconds = lag_idx / float(self._alignment_sr)
-            # Bound the lag to configured max shift
-            lag_seconds = float(max(-self._alignment_max_shift, min(self._alignment_max_shift, lag_seconds)))
-
-            # Positive lag_seconds means cam is behind reference (needs to start later)
-            offsets[cam] = lag_seconds
-
-        return offsets
+        return camera_clips
 
     def _extract_audio_segment(
         self,
@@ -1330,6 +1300,103 @@ class MultiCameraComposer:
 
         return timeline
 
+    def _generate_timelines_modular(
+        self,
+        camera_clips: list[CameraClip]
+    ) -> tuple[list[CompositionSegment], list[CompositionSegment]]:
+        """
+        Generate timelines using modular timeline module (Phase 3).
+
+        Args:
+            camera_clips: Legacy CameraClip objects
+
+        Returns:
+            Tuple of (video_timeline, audio_timeline) as legacy CompositionSegment lists
+        """
+        if not camera_clips:
+            return [], []
+
+        # Convert legacy CameraClip to modular CameraClip format
+        modular_clips = [
+            ModularCameraClip(
+                path=clip.path,
+                camera=clip.camera,
+                camera_id=clip.camera,  # Use camera name as ID
+                start_time=clip.start_time,
+                duration=clip.duration,
+                audio_quality_score=clip.audio_quality_score,
+                video_quality_score=clip.video_quality_score,
+                people_count=clip.people_count,
+            )
+            for clip in camera_clips
+        ]
+
+        # Convert speech segments if available
+        speech_segments = None
+        if hasattr(self, '_speaker_segments') and self._speaker_segments:
+            speech_segments = [
+                SpeechSegment(
+                    start=seg['start'],
+                    end=seg['end'],
+                    speaker=seg.get('speaker', 'Unknown')
+                )
+                for seg in self._speaker_segments
+            ]
+
+        # Generate timelines using modular architecture
+        logging.info("🔄 Using modular timeline generation (Phase 3)")
+        video_timeline_modular, audio_timeline_modular = self._timeline_generator.generate(
+            modular_clips,
+            speech_segments
+        )
+
+        # Convert modular segments to legacy CompositionSegment format
+        def to_legacy(segments):
+            return [
+                CompositionSegment(
+                    camera=seg.camera,
+                    clip_path=seg.clip_path,
+                    start_time=seg.start_time,
+                    duration=seg.duration,
+                    source_start=seg.source_start,
+                    needs_review=seg.needs_review,
+                    speech_active=seg.speech_active,
+                )
+                for seg in segments
+            ]
+
+        video_timeline = to_legacy(video_timeline_modular)
+        audio_timeline = to_legacy(audio_timeline_modular)
+
+        logging.info(
+            f"✅ Modular timeline generated: {len(video_timeline)} video segments, "
+            f"{len(audio_timeline)} audio segments"
+        )
+
+        return video_timeline, audio_timeline
+
+    def _get_people_count_for_timeline(
+        self,
+        clip: ModularCameraClip,
+        time: float
+    ) -> int:
+        """
+        People detector callable for timeline generation.
+
+        Returns people count for a clip at a specific time offset.
+        This is called by SpeechPeopleStrategy during silent segments.
+
+        Args:
+            clip: Modular camera clip
+            time: Time offset from event start (seconds)
+
+        Returns:
+            Number of people detected (0 if unavailable)
+        """
+        # Return stored people count from analysis
+        # In the future, this could sample video frames at the specific time
+        return int(clip.people_count)
+
     def _create_composite_video(
         self,
         video_timeline: list[CompositionSegment],
@@ -1425,13 +1492,13 @@ class MultiCameraComposer:
                 )
                 if need_overlay:
                     total_duration = sum(s.duration for s in video_timeline)
-                    ass_path = self._generate_timestamp_ass(
-                        tmpdir=tmpdir,
+                    ass_path = self._overlay_generator.generate_ass_file(
                         total_duration=total_duration,
                         event_start=self._event_start,
                         dst_offset_hours=self._overlay_dst_hours,
                         include_timestamp=self._overlay_enabled and self._event_start is not None,
                         review_segments=self._review_segments,
+                        tmpdir=tmpdir,
                     )
                     if ass_path:
                         overlayed_video_path = os.path.join(tmpdir, 'video_overlay.mp4')
@@ -1526,33 +1593,35 @@ class MultiCameraComposer:
                         logging.error(f"Failed to concatenate audio: {result.stderr.decode()}")
                         return False
                 else:
-                    # Build acrossfade chain: [0:a][1:a] -> A01, [A01][2:a] -> A02, ...
+                    # Build acrossfade (with optional ducking) using AudioProcessor
                     cmd = ['ffmpeg', '-y', '-loglevel', 'error']
                     for seg in audio_seg_files:
                         cmd.extend(['-i', seg])
-                    # Build filter graph
                     cf = max(0.01, min(5.0, self._audio_crossfade_s))
-                    filters: list[str] = []
-                    last_label = None
-                    n = len(audio_seg_files)
-                    if n == 2:
-                        filters.append(f"[0:a][1:a]acrossfade=d={cf}:c1=tri:c2=tri[aout]")
-                        out_label = 'aout'
-                    else:
-                        # First pair
-                        filters.append(f"[0:a][1:a]acrossfade=d={cf}:c1=tri:c2=tri[a01]")
-                        last_label = 'a01'
-                        for idx in range(2, n):
-                            next_label = f"a0{idx}"
-                            filters.append(
-                                f"[{last_label}][{idx}:a]acrossfade=d={cf}:c1=tri:c2=tri[{next_label}]"
-                            )
-                            last_label = next_label
-                        out_label = last_label or '0:a'
-
+                    mix_cfg = AudioMixConfig(
+                        crossfade_seconds=cf,
+                        curve1=self._audio_curve1,
+                        curve2=self._audio_curve2,
+                        overlap=self._audio_overlap,
+                        ducking_enabled=self._ducking_enabled,
+                        ducking_threshold=self._ducking_threshold,
+                        ducking_ratio=self._ducking_ratio,
+                        ducking_attack_ms=self._ducking_attack_ms,
+                        ducking_release_ms=self._ducking_release_ms,
+                        ducking_makeup=self._ducking_makeup,
+                    )
+                    ap = AudioProcessor(mix=mix_cfg)
+                    input_labels = [f"{i}:a" for i in range(len(audio_seg_files))]
+                    filters_str, out_label = ap.build_acrossfade_chain(
+                        input_labels,
+                        duration=cf,
+                        curve1=self._audio_curve1,
+                        curve2=self._audio_curve2,
+                        overlap=self._audio_overlap,
+                        output_label='aout',
+                    )
                     cmd.extend([
-                        '-filter_complex',
-                        '; '.join(filters),
+                        '-filter_complex', filters_str,
                         '-map', f'[{out_label}]',
                         '-c:a', 'pcm_s16le',
                         audio_path_wav,
@@ -1565,8 +1634,7 @@ class MultiCameraComposer:
                 # Step 4: Combine video (optionally overlayed) and audio
                 command = [
                     'ffmpeg',
-                    '-y',
-                    '-loglevel', 'error',
+                    '-y', '-nostdin', '-hide_banner', '-loglevel', 'error',
                     '-i', overlay_input_path,
                     '-i', audio_path_wav,
                     '-c:v', 'copy',
@@ -1576,7 +1644,7 @@ class MultiCameraComposer:
                     output_path
                 ]
 
-                result = subprocess.run(command, capture_output=True)
+                result = subprocess.run(command, capture_output=True, stdin=subprocess.DEVNULL)
                 if result.returncode != 0:
                     logging.error(f"Failed to combine video and audio: {result.stderr.decode()}")
                     return False
@@ -1594,10 +1662,10 @@ class MultiCameraComposer:
         try:
             res = subprocess.run(
                 [
-                    'ffprobe', '-v', 'error', '-select_streams', 'v:0',
+                    'ffprobe', '-v', 'error', '-hide_banner', '-select_streams', 'v:0',
                     '-show_entries', 'stream=width,height', '-of', 'json', path
                 ],
-                capture_output=True, text=True, check=True
+                capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL
             )
             data = json.loads(res.stdout or '{}')
             streams = data.get('streams') or []
@@ -1617,10 +1685,10 @@ class MultiCameraComposer:
         try:
             res = subprocess.run(
                 [
-                    'ffprobe', '-v', 'error', '-select_streams', 'a',
+                    'ffprobe', '-v', 'error', '-hide_banner', '-select_streams', 'a',
                     '-show_entries', 'stream=index', '-of', 'csv=p=0', path
                 ],
-                capture_output=True, text=True, check=True
+                capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL
             )
             out = (res.stdout or '').strip()
             return bool(out)
@@ -1681,13 +1749,13 @@ class MultiCameraComposer:
         ass_path = None
         if need_overlay:
             total_duration = sum(s.duration for s in video_timeline)
-            ass_path = self._generate_timestamp_ass(
-                tmpdir=tmpdir,
+            ass_path = self._overlay_generator.generate_ass_file(
                 total_duration=total_duration,
                 event_start=self._event_start,
                 dst_offset_hours=self._overlay_dst_hours,
                 include_timestamp=self._overlay_enabled and self._event_start is not None,
                 review_segments=self._review_segments,
+                tmpdir=tmpdir,
             )
 
         # Build filter graph
@@ -1743,19 +1811,30 @@ class MultiCameraComposer:
             filters.append(f"{a_inputs}concat=n={len(a_labels)}:v=0:a=1[acat]")
             aout = 'acat'
         else:
+            # Build acrossfade (with optional ducking) using AudioProcessor
             cf = max(0.01, min(5.0, self._audio_crossfade_s))
-            if len(a_labels) == 2:
-                filters.append(f"[{a_labels[0]}][{a_labels[1]}]acrossfade=d={cf}:c1=tri:c2=tri[afx]")
-                aout = 'afx'
-            else:
-                # Build chain
-                filters.append(f"[{a_labels[0]}][{a_labels[1]}]acrossfade=d={cf}:c1=tri:c2=tri[a01]")
-                last = 'a01'
-                for i in range(2, len(a_labels)):
-                    nxt = f"a0{i}"
-                    filters.append(f"[{last}][{a_labels[i]}]acrossfade=d={cf}:c1=tri:c2=tri[{nxt}]")
-                    last = nxt
-                aout = last
+            mix_cfg = AudioMixConfig(
+                crossfade_seconds=cf,
+                curve1=self._audio_curve1,
+                curve2=self._audio_curve2,
+                overlap=self._audio_overlap,
+                ducking_enabled=self._ducking_enabled,
+                ducking_threshold=self._ducking_threshold,
+                ducking_ratio=self._ducking_ratio,
+                ducking_attack_ms=self._ducking_attack_ms,
+                ducking_release_ms=self._ducking_release_ms,
+                ducking_makeup=self._ducking_makeup,
+            )
+            ap = AudioProcessor(mix=mix_cfg)
+            filters_str, aout = ap.build_acrossfade_chain(
+                a_labels,
+                duration=cf,
+                curve1=self._audio_curve1,
+                curve2=self._audio_curve2,
+                overlap=self._audio_overlap,
+                output_label='afx',
+            )
+            filters.append(filters_str)
 
         # Optional audio cleanup after stitching
         a_cleanup = self._build_audio_cleanup_filter()

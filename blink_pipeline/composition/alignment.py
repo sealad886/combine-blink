@@ -26,6 +26,7 @@ Performance:
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -72,7 +73,7 @@ class AlignmentResult:
     """
     camera: str
     offset_seconds: float
-    drift: float | None = None
+    drift: Optional[float] = None
     confidence: float = 1.0
     num_windows: int = 1
     offset_std: float = 0.0
@@ -119,12 +120,21 @@ class AlignmentEngine:
             config: Alignment configuration
         """
         self.config = config
+        # Adapter: allow using either dataclass AlignmentConfig or pydantic config
+        # with different field names (e.g., max_shift_seconds vs max_shift).
+
+    # Internal config accessor with alias and default support
+    def _cfg(self, name: str, default, alias: Optional[str] = None):
+        val = getattr(self.config, name, None)
+        if val is None and alias is not None:
+            val = getattr(self.config, alias, None)
+        return default if val is None else val
 
     def align_clips(
         self,
-        camera_clips: dict[str, list[Path]],
+        camera_clips: Dict[str, List[Path]],
         ref_camera: str
-    ) -> list[AlignmentResult]:
+    ) -> List[AlignmentResult]:
         """Align all cameras to reference camera.
 
         Args:
@@ -147,7 +157,8 @@ class AlignmentEngine:
         # Use first clip from each camera for alignment
         ref_clip = camera_clips[ref_camera][0]
 
-        results = []
+        results: List[AlignmentResult] = []
+        estimate_drift = bool(self._cfg('estimate_drift', False))
         for camera, clips in camera_clips.items():
             if camera == ref_camera:
                 continue  # Don't align reference to itself
@@ -166,7 +177,7 @@ class AlignmentEngine:
             results.append(AlignmentResult(
                 camera=camera,
                 offset_seconds=offset,
-                drift=drift if self.config.estimate_drift else None,
+                drift=drift if estimate_drift else None,
                 confidence=confidence,
                 num_windows=num_windows,
                 offset_std=offset_std
@@ -178,7 +189,7 @@ class AlignmentEngine:
         self,
         camera_clip: Path,
         ref_clip: Path
-    ) -> tuple[float, float | None, float, int, float]:
+    ) -> Tuple[float, float | None, float, int, float]:
         """Estimate offset and optional drift between two clips.
 
         Args:
@@ -197,18 +208,22 @@ class AlignmentEngine:
             return 0.0, None, 0.0, 0, 0.0
 
         # Multi-window analysis
-        window_samples = int(self.config.window_seconds * self.config.sample_rate)
+        window_seconds = float(self._cfg('window_seconds', 12.0, 'analysis_window_seconds'))
+        sample_rate = int(self._cfg('sample_rate', 16000))
+        window_samples = int(window_seconds * sample_rate)
         hop_samples = window_samples // 2  # 50% overlap
 
         min_length = min(len(camera_audio), len(ref_audio))
         if min_length < window_samples:
             # Single window analysis
+            max_shift = float(self._cfg('max_shift', 1.5, 'max_shift_seconds'))
+            interp = int(getattr(self.config, 'interpolation_factor', 16))
             offset = self._gcc_phat(
                 sig=camera_audio,
                 refsig=ref_audio,
-                fs=self.config.sample_rate,
-                max_tau=self.config.max_shift,
-                interp=self.config.interpolation_factor
+                fs=sample_rate,
+                max_tau=max_shift,
+                interp=interp
             )
             return offset, None, 1.0, 1, 0.0
 
@@ -226,12 +241,14 @@ class AlignmentEngine:
             camera_window = camera_audio[start:end]
             ref_window = ref_audio[start:end]
 
+            max_shift = float(self._cfg('max_shift', 1.5, 'max_shift_seconds'))
+            interp = int(getattr(self.config, 'interpolation_factor', 16))
             offset = self._gcc_phat(
                 sig=camera_window,
                 refsig=ref_window,
-                fs=self.config.sample_rate,
-                max_tau=self.config.max_shift,
-                interp=self.config.interpolation_factor
+                fs=sample_rate,
+                max_tau=max_shift,
+                interp=interp
             )
             offsets.append(offset)
 
@@ -244,9 +261,10 @@ class AlignmentEngine:
 
         # Estimate drift if enabled
         drift = None
-        if self.config.estimate_drift and len(offsets) > 1:
+        estimate_drift = bool(self._cfg('estimate_drift', False))
+        if estimate_drift and len(offsets) > 1:
             # Linear regression: offset = drift * time + intercept
-            times = np.array([i * self.config.window_seconds / 2 for i in range(len(offsets))])
+            times = np.array([i * window_seconds / 2 for i in range(len(offsets))])
             offsets_array = np.array(offsets)
 
             # Fit line
@@ -337,7 +355,7 @@ class AlignmentEngine:
         self,
         clip_path: Path,
         start_seconds: float = 0.0,
-        duration_seconds: float | None = None
+        duration_seconds: Optional[float] = None
     ) -> np.ndarray | None:
         """Extract audio segment from clip.
 
@@ -353,13 +371,19 @@ class AlignmentEngine:
             Audio as numpy array, or None if no audio
         """
         try:
+            # Resolve configuration with compatibility aliases
+            sr = int(self._cfg('sample_rate', 16000))
+            bandpass = bool(self._cfg('bandpass_enabled', True, 'bandpass'))
+            hp = int(self._cfg('bandpass_lowcut', 300, 'highpass_hz')) if bandpass else 0
+            lp = int(self._cfg('bandpass_highcut', 3000, 'lowpass_hz')) if bandpass else 0
+
             # Use audio_cache for efficient extraction
             wav_path = ensure_wav_cache(
                 str(clip_path),
-                sr=self.config.sample_rate,
-                bandpass=self.config.bandpass_enabled,
-                hp=int(self.config.bandpass_lowcut) if self.config.bandpass_enabled else 0,
-                lp=int(self.config.bandpass_highcut) if self.config.bandpass_enabled else 0
+                sr=sr,
+                bandpass=bandpass,
+                hp=hp,
+                lp=lp
             )
 
             if wav_path is None:
@@ -368,9 +392,9 @@ class AlignmentEngine:
             # Load audio
             import librosa
 
-            audio, sr = librosa.load(
+            audio, _ = librosa.load(
                 wav_path,
-                sr=self.config.sample_rate,
+                sr=sr,
                 offset=start_seconds,
                 duration=duration_seconds
             )
@@ -408,13 +432,13 @@ class CachedAlignmentEngine(AlignmentEngine):
             config: Alignment configuration
         """
         super().__init__(config)
-        self._cache: dict[tuple, AlignmentResult] = {}
+        self._cache: Dict[tuple, AlignmentResult] = {}
 
     def _estimate_offset(
         self,
         camera_clip: Path,
         ref_clip: Path
-    ) -> tuple[float, float | None, float, int, float]:
+    ) -> Tuple[float, float | None, float, int, float]:
         """Estimate offset with caching.
 
         Args:
@@ -428,12 +452,12 @@ class CachedAlignmentEngine(AlignmentEngine):
         cache_key = (
             str(camera_clip),
             str(ref_clip),
-            self.config.max_shift,
-            self.config.window_seconds,
-            self.config.sample_rate,
-            self.config.bandpass_enabled,
-            self.config.interpolation_factor,
-            self.config.estimate_drift
+            float(self._cfg('max_shift', 1.5, 'max_shift_seconds')),
+            float(self._cfg('window_seconds', 12.0, 'analysis_window_seconds')),
+            int(self._cfg('sample_rate', 16000)),
+            bool(self._cfg('bandpass_enabled', True, 'bandpass')),
+            int(getattr(self.config, 'interpolation_factor', 16)),
+            bool(self._cfg('estimate_drift', False))
         )
 
         if cache_key in self._cache:

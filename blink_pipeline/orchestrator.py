@@ -15,7 +15,7 @@ from .grouping import group_videos
 from .identify_speaker import SpeakerIdentifier
 from .logging_config import configure_worker_logging, setup_pipeline_logging
 from .media_validation import get_validation_stats, preprocess_videos
-from .multi_camera_composer import MultiCameraComposer
+from .composition.composer import ModularComposer
 from .pipeline_dashboard import PipelineDashboard
 from .stages import StageKey
 from .transcription import process_audio_for_transcription
@@ -306,7 +306,7 @@ def _merge_group_job(args: tuple[str, list[dict[str, Any]], str, dict[str, Any],
                 "visible": True,
                 "start_time": progress_dict[task_id].get("start_time", time.time())
             }
-            logging.getLogger("pipeline.merge").info(f"[PROGRESS] {group_name}: {completed}/{total}")
+            logging.getLogger("pipeline.merge").debug(f"[PROGRESS] {group_name}: {completed}/{total}")
         except Exception as e:
             logging.getLogger("pipeline.merge").warning(f"Failed to update progress: {e}")
 
@@ -319,9 +319,9 @@ def _merge_group_job(args: tuple[str, list[dict[str, Any]], str, dict[str, Any],
 
     try:
         if use_composer:
-            # Multi-camera composition
-            logging.getLogger("pipeline.merge").info(f"Using multi-camera composition for {group_name} ({len(cameras)} cameras)")
-            composer = MultiCameraComposer(config)
+            # Multi-camera composition using new modular framework
+            logging.getLogger("pipeline.merge").info(f"Using modular multi-camera composition for {group_name} ({len(cameras)} cameras)")
+            composer = ModularComposer(config)
             speech_segments = None
             speech_timeline = None
             if diarization_result:
@@ -392,7 +392,7 @@ def main():
                             merged.append((gname, os.path.join(group_outputs_dir, f)))
                 dashboard = PipelineDashboard(total_videos=0, total_groups=len(merged), total_clips=0)
                 with dashboard:
-                    dashboard.start_stage('final_transcription', len(merged))
+                    dashboard.start_stage(StageKey.FINAL_TRANSCRIPTION, len(merged))
                     # Prepare SpeakerIdentifier and merge in profile names
                     try:
                         speaker_identifier = SpeakerIdentifier(config)
@@ -461,8 +461,8 @@ def main():
                         with open(final_txt, 'w', encoding='utf-8') as fh:
                             fh.write("\n".join(lines) + ("\n" if lines else ""))
                         completed += 1
-                        dashboard.update_stage('final_transcription', completed, f"Done: {group_name}")
-                    dashboard.complete_stage('final_transcription', f"{completed} groups transcribed")
+                        dashboard.update_stage(StageKey.FINAL_TRANSCRIPTION, completed, f"Done: {group_name}")
+                    dashboard.complete_stage(StageKey.FINAL_TRANSCRIPTION, f"{completed} groups transcribed")
                 print(f"\nFinal transcripts saved to: {transcripts_final_dir}\n")
                 pipeline_logger.log_session_end(success=True)
                 return
@@ -470,10 +470,10 @@ def main():
             if mode == "build-speaker-profiles-only":
                 dashboard = PipelineDashboard(total_videos=0, total_groups=0, total_clips=0)
                 with dashboard:
-                    dashboard.start_stage('speaker_profiles', 1)
+                    dashboard.start_stage(StageKey.SPEAKER_PROFILES, 1)
                     count, path = _write_speaker_profiles(config)
-                    dashboard.update_stage('speaker_profiles', 1, f"{count} speakers")
-                    dashboard.complete_stage('speaker_profiles', f"Profiles at {path}")
+                    dashboard.update_stage(StageKey.SPEAKER_PROFILES, 1, f"{count} speakers")
+                    dashboard.complete_stage(StageKey.SPEAKER_PROFILES, f"Profiles at {path}")
                 print(f"\nSpeaker profiles: {path}\n")
                 pipeline_logger.log_session_end(success=True)
                 return
@@ -832,8 +832,6 @@ def main():
                                 if isinstance(update_data, dict) and task_id.startswith('merge_'):
                                     group_name = task_id.replace('merge_', '')
                                     latest = update_data.get("progress", 0)
-                                    total = update_data.get("total", 0)
-                                    logging.getLogger("pipeline").debug(f"[MONITOR] Reading progress for {group_name}: {latest}/{total}")
                                     dashboard.update_substage(StageKey.MERGE, group_name, latest)
 
                             if n_finished >= len(futures):
@@ -1032,13 +1030,13 @@ def main():
 
         # --- STAGE 7: Speaker Profiles Export (editable) ---
         pipeline_logger.log_stage_start("Speaker Profiles Export", 7)
-        dashboard.start_stage('speaker_profiles', 1)
-        dashboard.add_substage('speaker_profiles', 'profiles.json', 1)
+        dashboard.start_stage(StageKey.SPEAKER_PROFILES, 1)
+        dashboard.add_substage(StageKey.SPEAKER_PROFILES, 'profiles.json', 1)
         spk_count, prof_path = _write_speaker_profiles(config)
-        dashboard.update_substage('speaker_profiles', 'profiles.json', 1)
-        dashboard.update_stage('speaker_profiles', 1, f"{spk_count} speakers")
-        dashboard.remove_substage('speaker_profiles', 'profiles.json')
-        dashboard.complete_stage('speaker_profiles', f"Profiles at {prof_path}")
+        dashboard.update_substage(StageKey.SPEAKER_PROFILES, 'profiles.json', 1)
+        dashboard.update_stage(StageKey.SPEAKER_PROFILES, 1, f"{spk_count} speakers")
+        dashboard.remove_substage(StageKey.SPEAKER_PROFILES, 'profiles.json')
+        dashboard.complete_stage(StageKey.SPEAKER_PROFILES, f"Profiles at {prof_path}")
         pipeline_logger.log_stage_end("Speaker Profiles Export", 7, success=True,
                                       details=f"{spk_count} speakers exported")
 

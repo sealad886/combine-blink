@@ -65,6 +65,19 @@ def process_audio_for_transcription(
     whisper_settings = _parse_whisper_settings(transcription_config.get("whisper", {}))
     diarization_settings = _parse_diarization_settings(transcription_config.get("diarization", {}))
 
+    # Initialize audio enhancer if enabled
+    audio_enhancement_config = config.get("audio_enhancement", {})
+    use_enhancement = audio_enhancement_config.get("enabled", False)
+    enhancer = None
+    if use_enhancement:
+        try:
+            from blink_pipeline.audio_enhancement import AudioEnhancer
+            enhancer = AudioEnhancer(audio_enhancement_config)
+            logging.info("Audio enhancement enabled for transcription")
+        except Exception as e:
+            logging.warning(f"Failed to initialize audio enhancer: {e}, continuing without enhancement")
+            enhancer = None
+
     transcriber: _WhisperCppAdapter | _WhisperTranscriber
     if prefer_cpp and whisper_settings.ggml_model_path:
         logging.info("Using whisper.cpp directly (preferred on macOS)")
@@ -123,8 +136,26 @@ def process_audio_for_transcription(
                 running_offset += media_info.duration
                 continue
 
+            # Apply audio enhancement if enabled
+            audio_for_transcription = scratch_audio_path
+            if enhancer:
+                enhanced_path = os.path.join(tmpdir, f"clip_{index}_enhanced.wav")
+                try:
+                    success, msg = enhancer.enhance_audio_file(
+                        scratch_audio_path,
+                        enhanced_path,
+                        video_path=path
+                    )
+                    if success:
+                        audio_for_transcription = enhanced_path
+                        logging.info(f"    ✓ Audio enhanced: {msg}")
+                    else:
+                        logging.warning(f"    ⚠ Enhancement failed: {msg}")
+                except Exception as e:
+                    logging.warning(f"    ⚠ Enhancement error: {e}, using raw audio")
+
             logging.info(f"    → Transcribing audio ({media_info.duration:.1f}s)...")
-            transcript_segments = transcriber.transcribe_file(scratch_audio_path)
+            transcript_segments = transcriber.transcribe_file(audio_for_transcription)
             if not transcript_segments:
                 logging.warning("    ⚠ No speech detected in audio")
                 running_offset += media_info.duration
@@ -132,7 +163,7 @@ def process_audio_for_transcription(
             logging.info(f"    ✓ Found {len(transcript_segments)} speech segment(s)")
 
             logging.info("    → Running speaker diarization...")
-            diarization_annotation = diarizer.diarize_file(scratch_audio_path)
+            diarization_annotation = diarizer.diarize_file(audio_for_transcription)
             labelled_segments = _assign_speakers(
                 transcript_segments,
                 diarization_annotation,
