@@ -390,15 +390,21 @@ class AlignmentEngine:
                 return None
 
             # Load audio
-            import librosa
+            import torchaudio
 
-            audio, _ = librosa.load(
+            frame_offset = int(start_seconds * sr)
+            num_frames = int(duration_seconds * sr) if duration_seconds is not None else -1
+
+            waveform, loaded_sr = torchaudio.load(
                 wav_path,
-                sr=sr,
-                offset=start_seconds,
-                duration=duration_seconds
+                frame_offset=frame_offset,
+                num_frames=num_frames
             )
+            # The file from ensure_wav_cache is already mono with the correct sample rate.
+            assert loaded_sr == sr, f"Sample rate mismatch: expected {sr}, got {loaded_sr}"
+            assert waveform.shape[0] == 1, "Expected mono audio from cache"
 
+            return waveform.squeeze(0).numpy()
             return audio
 
         except Exception:
