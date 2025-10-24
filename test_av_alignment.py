@@ -1,5 +1,5 @@
 import numpy as np
-from src.av_alignment import gcc_phat
+from blink_pipeline.av_alignment import gcc_phat
 
 
 def test_gcc_phat_basic_delay():

@@ -26,7 +26,7 @@ linked component docs.
   - `multi_camera_composition.audio_alignment.hop_seconds`
   - `multi_camera_composition.audio_alignment.estimate_drift`
   - `multi_camera_composition.audio_crossfade_seconds`
-- Added `src/av_alignment.py` module with `estimate_offsets_and_drift()` and
+- Added `blink_pipeline/av_alignment.py` module with `estimate_offsets_and_drift()` and
   `gcc_phat()` implementations.
 - Documentation: `ALIGNMENT_ALGORITHM.md` for algorithm details; updated
   `README.md` and `docs/reference/configuration.md` with new settings.

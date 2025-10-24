@@ -19,7 +19,7 @@ from pathlib import Path
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(__file__))
 
-from src.media_validation import (
+from blink_pipeline.media_validation import (
     _get_progress_file_path,
     _load_progress,
     _save_progress,

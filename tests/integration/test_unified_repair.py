@@ -15,7 +15,7 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
-from src.media_validation import preprocess_videos, get_validation_stats
+from blink_pipeline.media_validation import preprocess_videos, get_validation_stats
 
 
 def test_unified_repair_cache():

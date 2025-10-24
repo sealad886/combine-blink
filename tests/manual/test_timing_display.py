@@ -7,7 +7,7 @@ the elapsed time column in action.
 """
 
 import time
-from src.pipeline_dashboard import PipelineDashboard
+from blink_pipeline.pipeline_dashboard import PipelineDashboard
 
 def test_substage_timing_display():
     """Test that substage elapsed times are displayed correctly."""

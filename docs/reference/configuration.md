@@ -1,7 +1,7 @@
 # Configuration Reference (`config.yaml`)
 
 The pipeline reads `config.yaml` at startup (`load_config()` in
-`src/orchestrator.py`). This document explains every top-level section and the
+`blink_pipeline/orchestrator.py`). This document explains every top-level section and the
 most important keys.
 
 ```yaml

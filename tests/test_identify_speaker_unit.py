@@ -1,79 +1,151 @@
-import os
-import sys
-import types
+"""
+Unit tests for speaker identification module.
+
+Tests speaker identification functionality with mocked dependencies.
+"""
+
+import pytest
 
 
-def run_check(config, expected_known):
-    # Provide a fake token so initialization does not fail on env lookup
-    os.environ.setdefault("HF_TOKEN", "dummy")
-    os.environ.setdefault("HUGGINGFACE_TOKEN", "dummy")
+class TestSpeakerIdentifier:
+    """Test suite for SpeakerIdentifier class."""
 
-    # Create fake pyannote.audio modules/classes
-    fake_pyannote = types.ModuleType("pyannote")
-    fake_audio = types.ModuleType("pyannote.audio")
+    def test_initialization_no_speakers(self, base_config, mock_pyannote, mock_env_tokens):
+        """Test SpeakerIdentifier initialization without known speakers."""
+        from blink_pipeline.identify_speaker import SpeakerIdentifier
 
-    class FakeModel:
-        @staticmethod
-        def from_pretrained(*args, **kwargs):
-            return object()
+        config = base_config.copy()
+        config['speakers'] = {'known_speakers': {}}
 
-    class FakeInference:
-        def __init__(self, model, window="whole"):
-            pass
-        def to(self, device):
-            return self
-        def __call__(self, path):
-            import numpy as np
-            return np.ones((1, 4), dtype=np.float32)
+        si = SpeakerIdentifier(config)
 
-    fake_audio.Inference = FakeInference
-    fake_audio.Model = FakeModel
+        assert si.known_speakers_map == {}
+        assert si.config is not None
 
-    # Inject fakes
-    sys.modules["pyannote"] = fake_pyannote
-    sys.modules["pyannote.audio"] = fake_audio
+    def test_initialization_with_speakers(self, base_config, mock_pyannote, mock_env_tokens):
+        """Test SpeakerIdentifier initialization with known speakers mapping."""
+        from blink_pipeline.identify_speaker import SpeakerIdentifier
 
-    from src.identify_speaker import SpeakerIdentifier
+        config = base_config.copy()
+        config['speakers'] = {
+            'known_speakers': {
+                'speaker_0001': 'Alice',
+                'speaker_0002': 'Bob'
+            }
+        }
 
-    si = SpeakerIdentifier(config)
-    assert si.known_speakers_map == expected_known
+        si = SpeakerIdentifier(config)
 
-    # name substitution test
-    transcript = [
-        {"speaker": "speaker_0001", "text": "hello"},
-        {"speaker": "speaker_9999", "text": "world"},
-    ]
-    named = si.substitute_names_in_transcript(transcript)
-    if expected_known:
-        assert named[0]["speaker"] == expected_known.get("speaker_0001", "speaker_0001")
-    else:
+        assert si.known_speakers_map == {
+            'speaker_0001': 'Alice',
+            'speaker_0002': 'Bob'
+        }
+
+    def test_substitute_names_no_mapping(self, base_config, mock_pyannote, mock_env_tokens):
+        """Test name substitution when no speaker mapping exists."""
+        from blink_pipeline.identify_speaker import SpeakerIdentifier
+
+        config = base_config.copy()
+        config['speakers'] = {'known_speakers': {}}
+
+        si = SpeakerIdentifier(config)
+
+        transcript = [
+            {"speaker": "speaker_0001", "text": "hello"},
+            {"speaker": "speaker_9999", "text": "world"},
+        ]
+
+        named = si.substitute_names_in_transcript(transcript)
+
+        # Without mapping, speaker IDs should remain unchanged
         assert named[0]["speaker"] == "speaker_0001"
-    assert named[1]["speaker"] == "speaker_9999"
+        assert named[1]["speaker"] == "speaker_9999"
+        assert named[0]["text"] == "hello"
+        assert named[1]["text"] == "world"
+
+    def test_substitute_names_with_mapping(self, base_config, mock_pyannote, mock_env_tokens):
+        """Test name substitution with speaker mapping."""
+        from blink_pipeline.identify_speaker import SpeakerIdentifier
+
+        config = base_config.copy()
+        config['speakers'] = {
+            'known_speakers': {
+                'speaker_0001': 'Alice'
+            }
+        }
+
+        si = SpeakerIdentifier(config)
+
+        transcript = [
+            {"speaker": "speaker_0001", "text": "hello"},
+            {"speaker": "speaker_9999", "text": "world"},
+        ]
+
+        named = si.substitute_names_in_transcript(transcript)
+
+        # Mapped speaker should be replaced
+        assert named[0]["speaker"] == "Alice"
+        # Unmapped speaker should remain unchanged
+        assert named[1]["speaker"] == "speaker_9999"
+
+    def test_substitute_names_preserves_transcript_structure(
+        self, base_config, mock_pyannote, mock_env_tokens
+    ):
+        """Test that name substitution preserves all transcript fields."""
+        from blink_pipeline.identify_speaker import SpeakerIdentifier
+
+        config = base_config.copy()
+        config['speakers'] = {
+            'known_speakers': {
+                'speaker_0001': 'Alice'
+            }
+        }
+
+        si = SpeakerIdentifier(config)
+
+        transcript = [
+            {
+                "start": 0.0,
+                "end": 3.5,
+                "speaker": "speaker_0001",
+                "text": "Hello everyone",
+                "confidence": 0.95
+            }
+        ]
+
+        named = si.substitute_names_in_transcript(transcript)
+
+        assert named[0]["speaker"] == "Alice"
+        assert named[0]["start"] == 0.0
+        assert named[0]["end"] == 3.5
+        assert named[0]["text"] == "Hello everyone"
+        assert named[0]["confidence"] == 0.95
+
+    def test_device_configuration(self, base_config, mock_pyannote, mock_env_tokens):
+        """Test that device configuration is properly parsed."""
+        from blink_pipeline.identify_speaker import SpeakerIdentifier
+
+        config = base_config.copy()
+        config['speaker_identification']['device'] = 'cpu'
+        config['speakers'] = {'known_speakers': {}}
+
+        si = SpeakerIdentifier(config)
+
+        # Device should be set in settings (exact value depends on platform detection)
+        assert hasattr(si, 'settings')
+        assert hasattr(si.settings, 'device')
 
 
-if __name__ == "__main__":
-    # Case 1: no speakers mapping
-    cfg1 = {
-        "paths": {"output_dir": "output", "speakers_dir": "speaker_voice_samples"},
-        "speaker_identification": {
-            "embedding_model_id": "pyannote/wespeaker-voxceleb-resnet34-LM",
-            "auth_token_env": ["HF_TOKEN", "HUGGINGFACE_TOKEN"],
-            "device": "cpu",
-            "similarity_threshold": 0.9,
-        },
-    }
-    run_check(cfg1, {})
+@pytest.mark.unit
+class TestSpeakerIdentificationConfig:
+    """Test configuration parsing for speaker identification."""
 
-    # Case 2: with speakers mapping
-    cfg2 = {
-        "paths": {"output_dir": "output", "speakers_dir": "speaker_voice_samples"},
-        "speaker_identification": {
-            "embedding_model_id": "pyannote/wespeaker-voxceleb-resnet34-LM",
-            "auth_token_env": ["HF_TOKEN", "HUGGINGFACE_TOKEN"],
-            "device": "cpu",
-            "similarity_threshold": 0.9,
-        },
-        "speakers": {"known_speakers": {"speaker_0001": "Alice"}},
-    }
-    run_check(cfg2, {"speaker_0001": "Alice"})
-    print("identify_speaker basic checks passed.")
+    @pytest.mark.skip(reason="identify_speaker doesn't expose _parse_settings function; it's private within __init__")
+    def test_parse_settings_cpu(self, base_config):
+        """Test parsing speaker identification settings for CPU."""
+        pass
+
+    @pytest.mark.skip(reason="identify_speaker doesn't expose _parse_settings function; it's private within __init__")
+    def test_parse_settings_mps_preference(self, base_config):
+        """Test MPS preference on macOS."""
+        pass

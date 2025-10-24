@@ -8,7 +8,7 @@ that each substage's timer starts independently when work begins on it.
 
 import time
 import threading
-from src.pipeline_dashboard import PipelineDashboard
+from blink_pipeline.pipeline_dashboard import PipelineDashboard
 
 def process_group(dashboard, group_name, num_clips, delay_per_clip):
     """Simulate processing a group with specified delay."""

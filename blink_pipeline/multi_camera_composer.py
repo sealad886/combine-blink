@@ -1,0 +1,1997 @@
+"""
+Multi-camera video composition module.
+
+This module handles compositing videos from multiple cameras that recorded the same
+event from different angles. It analyzes audio quality, selects optimal camera angles,
+and creates a final composite video with the best footage and audio.
+
+FEATURE FLAG: use_modular_composition
+  When enabled, uses the new modular composition architecture from
+  blink_pipeline.composition instead of the legacy monolithic implementation.
+"""
+
+import io
+import json
+import logging
+import os
+import re
+import subprocess
+import tempfile
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+from PIL import Image
+
+from blink_pipeline.av_alignment import estimate_per_clip_offsets
+
+# Modular composition imports (Phase 2)
+from blink_pipeline.composition.alignment import (
+    AlignmentConfig,
+    CachedAlignmentEngine,
+)
+# Modular composition imports (Phase 3)
+from blink_pipeline.composition.timeline import (
+    TimelineGenerator,
+    CameraClip as ModularCameraClip,
+    SpeechSegment,
+)
+from blink_pipeline.composition.config import CompositionConfig, AudioMixConfig, TimestampOverlayConfig
+from blink_pipeline.composition.audio import AudioProcessor
+from blink_pipeline.composition.overlay import OverlayGenerator
+from blink_pipeline.media_utils import probe_media_info
+from blink_pipeline.people_detection import PeopleDetector, PeopleDetectorConfig
+
+
+@dataclass
+class CameraClip:
+    """Represents a single camera clip with metadata."""
+    path: str
+    camera: str
+    start_time: float  # Seconds since event start
+    duration: float
+    audio_quality_score: float = 0.0
+    video_quality_score: float = 0.0
+    people_count: float = 0.0
+
+
+@dataclass
+class CompositionSegment:
+    """Represents a segment of the final composition."""
+    camera: str
+    clip_path: str
+    start_time: float  # Time in the final composition
+    duration: float
+    source_start: float = 0.0  # Start time within the source clip
+    needs_review: bool = False
+    speech_active: bool = True
+
+
+class MultiCameraComposer:
+    """
+    Composes multi-camera events into a single video with intelligent
+    camera switching and optimal audio selection.
+    """
+
+    def __init__(self, config: dict[str, Any]):
+        """
+        Initialize the composer with configuration.
+
+        Args:
+            config: Configuration dictionary containing composition settings.
+        """
+        self.config = config
+        self.composition_config = config.get('multi_camera_composition', {})
+
+        # Feature flag: Use modular composition architecture
+        self._use_modular_composition = bool(
+            self.composition_config.get('use_modular_composition', False)
+        )
+
+        # Initialize modular quality analyzer if feature flag is enabled
+        if self._use_modular_composition:
+            from blink_pipeline.composition import (
+                CachedQualityAnalyzer,
+                FFmpegAudioQualityAnalyzer,
+            )
+
+            # Determine cache directory for quality analysis
+            cache_base = self.config.get('output', {}).get('audio_cache_dir', 'output/audio_cache')
+            if cache_base:
+                quality_cache_dir = Path(cache_base) / 'quality_analysis'
+            else:
+                quality_cache_dir = None
+
+            # Create analyzers
+            base_analyzer = FFmpegAudioQualityAnalyzer(timeout=30)
+            self._modular_quality_analyzer = CachedQualityAnalyzer(
+                base_analyzer,
+                cache_dir=quality_cache_dir
+            )
+
+            # Create timeline generator (Phase 3)
+            comp_config = CompositionConfig.from_dict(self.composition_config)
+            self._timeline_generator = TimelineGenerator(
+                comp_config,
+                people_detector=self._get_people_count_for_timeline
+            )
+
+            logging.info("✅ Modular composition enabled - using blink_pipeline.composition modules")
+        else:
+            self._modular_quality_analyzer = None
+            self._modular_alignment_engine = None
+            self._timeline_generator = None
+            # Emit explicit debug log to satisfy legacy quality logging expectations
+            logging.debug("Using legacy quality analysis (legacy composition implementation active)")
+
+        # Default composition settings
+        self.switching_strategy = self.composition_config.get('switching_strategy', 'time_based')
+        self.switching_interval = self.composition_config.get('switching_interval', 5.0)
+        self.transition_style = self.composition_config.get('transition_style', 'cut')
+        self.transition_duration = self.composition_config.get('transition_duration', 0.5)
+        self.audio_source = self.composition_config.get('audio_source', 'best_quality')
+        self.enable_composition = self.composition_config.get('enable_composition', True)
+        # Determine if we actually need to analyze audio
+        self._needs_audio_analysis = (
+            self.audio_source == 'best_quality'
+            or self.switching_strategy in ('audio_quality', 'speech_people')
+        )
+
+        weights_cfg = self.composition_config.get('audio_quality_weights', {})
+        self._quality_weights = {
+            'rms': float(weights_cfg.get('rms', 0.4)),
+            'peak': float(weights_cfg.get('peak', weights_cfg.get('peak_level', 0.2))),
+            'noise': float(weights_cfg.get('noise', weights_cfg.get('noise_floor', 0.2))),
+            'clip': float(weights_cfg.get('clip', weights_cfg.get('clipping', 0.2))),
+        }
+        total_weight = sum(self._quality_weights.values())
+        if total_weight <= 0:
+            self._quality_weights = {'rms': 1.0, 'peak': 0.0, 'noise': 0.0, 'clip': 0.0}
+        else:
+            self._quality_weights = {
+                k: (v / total_weight if total_weight else 0.0)
+                for k, v in self._quality_weights.items()
+            }
+
+        # Fine audio alignment configuration
+        self.alignment_config = self.composition_config.get('audio_alignment', {
+            'enabled': True,
+            'max_shift_seconds': 1.5,
+            'analysis_window_seconds': 12.0,
+            'sample_rate': 16000,
+            'bandpass': True,
+            'highpass_hz': 300,
+            'lowpass_hz': 3000,
+        })
+        self._alignment_enabled: bool = bool(self.alignment_config.get('enabled', True))
+        self._alignment_max_shift: float = float(self.alignment_config.get('max_shift_seconds', 1.5))
+        self._alignment_window: float = float(self.alignment_config.get('analysis_window_seconds', 12.0))
+        self._alignment_sr: int = int(self.alignment_config.get('sample_rate', 16000))
+        self._alignment_bandpass: bool = bool(self.alignment_config.get('bandpass', True))
+        self._alignment_hp: int = int(self.alignment_config.get('highpass_hz', 300))
+        self._alignment_lp: int = int(self.alignment_config.get('lowpass_hz', 3000))
+        # New alignment tuning
+        self._alignment_hop: float = float(self.alignment_config.get('hop_seconds', max(0.1, self._alignment_window / 2.0)))
+        self._alignment_estimate_drift: bool = bool(self.alignment_config.get('estimate_drift', True))
+        # Storage for per-camera alignment metadata
+        self._alignment_offsets: dict[str, float] = {}
+        self._alignment_drifts: dict[str, float] = {}
+
+        # Initialize modular alignment engine if feature flag is enabled
+        if self._use_modular_composition and self._alignment_enabled:
+            alignment_cfg = AlignmentConfig(
+                enabled=self._alignment_enabled,
+                max_shift=self._alignment_max_shift,
+                window_seconds=self._alignment_window,
+                sample_rate=self._alignment_sr,
+                bandpass_enabled=self._alignment_bandpass,
+                bandpass_lowcut=float(self._alignment_hp),
+                bandpass_highcut=float(self._alignment_lp),
+                interpolation_factor=16,  # Default interpolation
+                estimate_drift=self._alignment_estimate_drift
+            )
+            self._modular_alignment_engine = CachedAlignmentEngine(alignment_cfg)
+            logging.info("✅ Modular alignment engine initialized with caching")
+        else:
+            self._modular_alignment_engine = None
+
+        people_defaults = {
+            'enabled': True,
+            'sample_frames': 6,  # retained for compatibility; detection is on-demand now
+            'resize_width': 640,
+            'min_frame_width': 320,
+            # Default to a lighter, CPU-friendly model
+            'model_name': 'hustvl/yolos-tiny',
+            'revision': None,
+            'score_threshold': 0.7,
+            'min_count': 1,
+        }
+        self.people_config = people_defaults.copy()
+        self.people_config.update(self.composition_config.get('people_detection', {}))
+        people_enabled_cfg = bool(self.people_config.get('enabled', True))
+        self._people_detection_enabled: bool = (
+            self.switching_strategy == 'speech_people' and people_enabled_cfg
+        )
+        self._people_sample_frames: int = max(1, int(self.people_config.get('sample_frames', 6)))
+        self._people_resize_width: int = max(160, int(self.people_config.get('resize_width', 640)))
+        self._people_min_frame_width: int = max(160, int(self.people_config.get('min_frame_width', 320)))
+        self._people_min_count: int = max(0, int(self.people_config.get('min_count', 1)))
+        # Hugging Face people detector (lazy) and cache
+        self._people_detector: PeopleDetector | None = None
+        self._people_counts_cache: dict[tuple[str, int], int] = {}
+
+        # Timestamp overlay configuration
+        self.overlay_config = self.composition_config.get('timestamp_overlay', {
+            'enabled': True,
+            'font': 'Arial',
+            'font_size': 24,
+            'margin_v': 20,
+            'margin_r': 20,
+            'dst_offset_hours': 1,
+        })
+        self._overlay_enabled: bool = bool(self.overlay_config.get('enabled', True))
+        self._overlay_font: str = str(self.overlay_config.get('font', 'Arial'))
+        self._overlay_font_size: int = int(self.overlay_config.get('font_size', 24))
+        self._overlay_margin_v: int = int(self.overlay_config.get('margin_v', 20))
+        self._overlay_margin_r: int = int(self.overlay_config.get('margin_r', 20))
+        self._overlay_dst_hours: int = int(self.overlay_config.get('dst_offset_hours', 1))
+        # Centralized overlay generator (ASS subtitles)
+        try:
+            _ts_cfg = TimestampOverlayConfig(
+                enabled=self._overlay_enabled,
+                font=self._overlay_font,
+                font_size=self._overlay_font_size,
+                margin_v=self._overlay_margin_v,
+                margin_r=self._overlay_margin_r,
+                dst_offset_hours=self._overlay_dst_hours,
+            )
+        except Exception:
+            # Fallback to defaults if config dict is malformed
+            _ts_cfg = TimestampOverlayConfig()
+        self._overlay_generator = OverlayGenerator(_ts_cfg)
+
+        cleanup_defaults = {
+            'enabled': True,
+            'highpass_hz': 120.0,
+            'lowpass_hz': 7000.0,
+            'denoise': True,
+            'denoise_nf': -25.0,
+            'loudness_normalize': True,
+            'loudnorm_target_i': -24.0,
+            'loudnorm_target_tp': -2.0,
+            'loudnorm_target_lra': 11.0,
+            'extra_filters': [],
+            'custom_filter': None,
+        }
+        cleanup_cfg = cleanup_defaults.copy()
+        cleanup_cfg.update(self.composition_config.get('audio_cleanup', {}))
+
+        def _float_or_none(value: Any) -> float | None:
+            if value is None:
+                return None
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        self._cleanup_enabled: bool = bool(cleanup_cfg.get('enabled', True))
+        self._cleanup_highpass: float | None = _float_or_none(cleanup_cfg.get('highpass_hz'))
+        if self._cleanup_highpass is not None and self._cleanup_highpass <= 0:
+            self._cleanup_highpass = None
+        self._cleanup_lowpass: float | None = _float_or_none(cleanup_cfg.get('lowpass_hz'))
+        if self._cleanup_lowpass is not None and self._cleanup_lowpass <= 0:
+            self._cleanup_lowpass = None
+        self._cleanup_denoise: bool = bool(cleanup_cfg.get('denoise', True))
+        nf_value = _float_or_none(cleanup_cfg.get('denoise_nf'))
+        self._cleanup_denoise_nf: float = nf_value if nf_value is not None else -25.0
+        self._cleanup_loudnorm: bool = bool(cleanup_cfg.get('loudness_normalize', True))
+        loudnorm_i = _float_or_none(cleanup_cfg.get('loudnorm_target_i'))
+        self._cleanup_loudnorm_i: float = loudnorm_i if loudnorm_i is not None else -24.0
+        loudnorm_tp = _float_or_none(cleanup_cfg.get('loudnorm_target_tp'))
+        self._cleanup_loudnorm_tp: float = loudnorm_tp if loudnorm_tp is not None else -2.0
+        loudnorm_lra = _float_or_none(cleanup_cfg.get('loudnorm_target_lra'))
+        self._cleanup_loudnorm_lra: float = loudnorm_lra if loudnorm_lra is not None else 11.0
+
+        extra_filters = cleanup_cfg.get('extra_filters', [])
+        if isinstance(extra_filters, str):
+            extra_filters = [extra_filters]
+        self._cleanup_extra_filters: list[str] = [str(f) for f in extra_filters if f]
+        custom_filter = cleanup_cfg.get('custom_filter')
+        self._cleanup_custom_filter: str | None = str(custom_filter) if custom_filter else None
+        self._cleanup_filter_string: str | None = None
+
+        # Event start (wall-clock) captured during analysis for overlay timing
+        self._event_start: datetime | None = None
+        self._speech_segments_event: list[tuple[float, float]] = []
+        self._review_segments: list[tuple[float, float]] = []
+        self._has_speech_data: bool = False
+        # Audio stitching improvements
+        self._audio_crossfade_s: float = float(self.composition_config.get('audio_crossfade_seconds', 0.06))
+        # Audio mix options (curves, overlap) with backward-compat support
+        _mix_cfg = self.composition_config.get('audio_mix', {}) or {}
+        self._audio_curve1: str = str(_mix_cfg.get('curve1', 'tri')).lower()
+        self._audio_curve2: str = str(_mix_cfg.get('curve2', 'tri')).lower()
+        _valid_curves = {
+            'tri','qsin','hsin','esin','log','ipar','qua','cub','squ','cbr','par','exp',
+            'iqsin','ihsin','dese','desi','losi','sinc','isinc','quat','quatr','qsin2','hsin2','nofade'
+        }
+        if self._audio_curve1 not in _valid_curves:
+            self._audio_curve1 = 'tri'
+        if self._audio_curve2 not in _valid_curves:
+            self._audio_curve2 = 'tri'
+        # If nested crossfade is present, prefer it over deprecated top-level seconds
+        try:
+            _xf = _mix_cfg.get('crossfade_seconds', None)
+            if _xf is not None:
+                self._audio_crossfade_s = float(_xf)
+        except (TypeError, ValueError):
+            pass
+        self._audio_overlap: bool = bool(_mix_cfg.get('overlap', True))
+        # Ducking configuration (optional)
+        self._ducking_enabled: bool = bool(_mix_cfg.get('ducking_enabled', False))
+        def _get_mix_float(key: str, default: float) -> float:
+            try:
+                v = _mix_cfg.get(key, default)
+                return float(v)
+            except (TypeError, ValueError):
+                return default
+        self._ducking_threshold: float = _get_mix_float('ducking_threshold', 0.125)
+        self._ducking_ratio: float = _get_mix_float('ducking_ratio', 2.0)
+        self._ducking_attack_ms: float = _get_mix_float('ducking_attack_ms', 20.0)
+        self._ducking_release_ms: float = _get_mix_float('ducking_release_ms', 250.0)
+        self._ducking_makeup: float = _get_mix_float('ducking_makeup', 1.0)
+
+        # Encoding/IO performance options
+        enc_cfg = self.composition_config.get('encoding', {})
+        self._single_pass = bool(self.composition_config.get('single_pass_filter_complex', True))
+        self._use_hw_encode = bool(enc_cfg.get('use_hw_encode', False))
+        self._hw_codec = str(enc_cfg.get('hw_codec', 'libx264'))
+        self._x264_preset = str(enc_cfg.get('x264_preset', 'veryfast'))
+        self._x264_crf = str(enc_cfg.get('x264_crf', '22'))
+        self._target_bitrate = str(enc_cfg.get('bitrate', '6000k'))
+
+    def compose_multi_camera_event(
+        self,
+        video_clips: list[dict[str, Any]],
+        output_path: str,
+        speech_segments: list[dict[str, Any]] | None = None,
+        speech_timeline: list[dict[str, Any]] | None = None,
+        progress_callback: Callable | None = None,
+    ) -> bool:
+        """
+        Create a composite video from multiple camera angles of the same event.
+
+        Args:
+            video_clips: List of video file dictionaries (with 'path', 'camera', 'datetime')
+            output_path: Path where the final composite video will be saved
+            speech_segments: Optional diarization segments with start/end times (seconds)
+            speech_timeline: Optional clip timeline produced during transcription
+            progress_callback: Optional callback function(current, total) for progress updates
+
+        Returns:
+            bool: True if composition succeeded, False otherwise
+        """
+        # If only one clip or composition disabled, use simple merge
+        if len(video_clips) == 1 or not self.enable_composition:
+            logging.info("Single camera or composition disabled, using simple copy")
+            result = self._simple_copy(video_clips, output_path)
+            if progress_callback:
+                progress_callback(len(video_clips), len(video_clips))  # Report completion
+            return result
+
+        # Check if all clips are from the same camera (shouldn't happen with new grouping)
+        cameras = set(clip['camera'] for clip in video_clips)
+        if len(cameras) == 1:
+            logging.info(f"All clips from same camera ({cameras.pop()}), using sequential merge")
+            result = self._sequential_merge(video_clips, output_path)
+            if progress_callback:
+                progress_callback(len(video_clips), len(video_clips))  # Report completion
+            return result
+
+        logging.info(f"Composing multi-camera event from {len(video_clips)} clips across {len(cameras)} cameras")
+
+        # Calculate total steps for progress tracking
+        total_steps = len(video_clips)
+
+        def _report_progress(completed: int):
+            """Helper to report progress if callback provided."""
+            if progress_callback:
+                try:
+                    logging.info(f"[COMPOSER] Reporting progress: {completed}/{total_steps}")
+                    progress_callback(completed, total_steps)
+                except Exception as e:
+                    logging.warning(f"Progress callback error: {e}", exc_info=True)
+
+        try:
+            # Step 1: Analyze audio quality for each clip and capture event start (20% of work)
+            _report_progress(int(total_steps * 0.0))
+            camera_clips = self._analyze_clips(video_clips)
+            self._load_speech_segments(speech_segments, speech_timeline, camera_clips)
+            self._review_segments = []
+            _report_progress(int(total_steps * 0.2))
+
+            # Step 1b: Estimate per-clip fine alignment offsets and adjust timings (10% of work)
+            if self._alignment_enabled:
+                try:
+                    ref_clip = max(camera_clips, key=lambda x: x.audio_quality_score)
+
+                    # FEATURE FLAG: Use modular alignment engine or legacy implementation
+                    if self._use_modular_composition and self._modular_alignment_engine:
+                        logging.info("Using modular AlignmentEngine for audio alignment")
+
+                        # Prepare camera_clips dict for modular engine
+                        camera_clips_dict: dict[str, list[Path]] = {}
+                        for cc in camera_clips:
+                            if cc.camera not in camera_clips_dict:
+                                camera_clips_dict[cc.camera] = []
+                            camera_clips_dict[cc.camera].append(Path(cc.path))
+
+                        # Run alignment with modular engine
+                        alignment_results = self._modular_alignment_engine.align_clips(
+                            camera_clips=camera_clips_dict,
+                            ref_camera=ref_clip.camera
+                        )
+
+                        # Convert results to legacy format for compatibility
+                        clip_offsets = {
+                            result.camera: result.offset_seconds
+                            for result in alignment_results
+                        }
+
+                        # Log alignment results
+                        for result in alignment_results:
+                            logging.info(
+                                f"Alignment: {result.camera} offset={result.offset_seconds:.4f}s "
+                                f"confidence={result.confidence:.3f} windows={result.num_windows} "
+                                f"std={result.offset_std:.4f}s"
+                            )
+                    else:
+                        logging.debug("Using legacy alignment implementation")
+                        clip_offsets = estimate_per_clip_offsets(
+                            camera_clips,
+                            ref_clip.camera,
+                            sample_rate=self._alignment_sr,
+                            window_seconds=self._alignment_window,
+                            hop_seconds=self._alignment_hop,
+                            max_shift_seconds=self._alignment_max_shift,
+                            bandpass=self._alignment_bandpass,
+                            hp=self._alignment_hp,
+                            lp=self._alignment_lp,
+                        )
+
+                    # Store and apply per-clip base offsets (common for both implementations)
+                    self._alignment_offsets_clip = dict(clip_offsets or {})
+                    if self._alignment_offsets_clip:
+                        for cc in camera_clips:
+                            base = self._alignment_offsets_clip.get(cc.path, 0.0)
+                            if base == 0.0:
+                                # Try camera name if path not found
+                                base = self._alignment_offsets_clip.get(cc.camera, 0.0)
+                            if abs(base) > 1e-6:
+                                cc.start_time = max(0.0, cc.start_time + base)
+                        logging.info("Applied per-clip alignment offsets for %d clips", len(self._alignment_offsets_clip))
+                except Exception as e:
+                    logging.warning("Audio alignment estimation failed, continuing without it: %s", e)
+            _report_progress(int(total_steps * 0.3))
+
+            # Step 2: Generate overlap-aligned timelines for video and audio across the full event (10% of work)
+            if self._use_modular_composition and self._timeline_generator:
+                # Use modular timeline generation (Phase 3)
+                video_timeline, audio_timeline = self._generate_timelines_modular(camera_clips)
+            else:
+                # Use legacy timeline generation
+                video_timeline, audio_timeline = self._generate_aligned_timelines(camera_clips)
+
+            self._review_segments = self._extract_review_segments(video_timeline)
+            _report_progress(int(total_steps * 0.4))
+
+            # Step 3: Create the composite video using ffmpeg (60% of work)
+            success = self._create_composite_video(video_timeline, audio_timeline, output_path)
+            _report_progress(total_steps)  # 100% complete
+
+            if success:
+                logging.info(f"Successfully composed multi-camera event to {output_path}")
+
+            return success
+
+        except Exception as e:
+            logging.error(f"Failed to compose multi-camera event: {e}")
+            # Fallback to simple merge on error
+            logging.info("Falling back to sequential merge")
+            result = self._sequential_merge(video_clips, output_path)
+            if progress_callback:
+                progress_callback(total_steps, total_steps)  # Report completion even on fallback
+            return result
+
+    def _analyze_clips(self, video_clips: list[dict[str, Any]]) -> list[CameraClip]:
+        """
+        Analyze each clip for audio and video quality.
+
+        Args:
+            video_clips: List of video file dictionaries
+
+        Returns:
+            List of CameraClip objects with quality scores
+        """
+        camera_clips: list[CameraClip] = []
+
+        # Find the earliest timestamp to establish event start time
+        event_start = min(clip['datetime'] for clip in video_clips)
+        self._event_start = event_start
+
+        for clip in video_clips:
+            media_info = probe_media_info(clip['path'])
+            if media_info.duration <= 0:
+                logging.warning("Skipping clip with invalid duration: %s", clip['path'])
+                continue
+
+            # Relative start time of this clip within the event
+            start_offset = (clip['datetime'] - event_start).total_seconds()
+
+            # Analyze audio quality only if needed for strategy
+            if self._needs_audio_analysis:
+                audio_score = self._calculate_audio_quality(clip['path'], media_info)
+            else:
+                audio_score = 0.5  # neutral default when not used
+
+            # Video quality and people_count can be added later; use placeholders
+            camera_clips.append(
+                CameraClip(
+                    path=clip['path'],
+                    camera=clip['camera'],
+                    start_time=start_offset,
+                    duration=media_info.duration,
+                    audio_quality_score=audio_score,
+                    video_quality_score=0.0,
+                    people_count=0.0,
+                )
+            )
+
+        return camera_clips
+
+    def _extract_audio_segment(
+        self,
+        video_path: str,
+        source_start: float,
+        duration: float,
+        sr: int = 16000,
+        bandpass: bool = True,
+        hp: int = 300,
+        lp: int = 3000,
+    ) -> np.ndarray:
+        """Extract a mono PCM audio segment as numpy array of float32 in [-1, 1]."""
+        filter_chain = []
+        if bandpass:
+            filter_chain.append(f"highpass=f={hp}")
+            filter_chain.append(f"lowpass=f={lp}")
+        af = None
+        if filter_chain:
+            af = ','.join(filter_chain)
+
+        cmd = [
+            'ffmpeg',
+            '-ss', f"{max(0.0, source_start):.3f}",
+            '-t', f"{max(0.0, duration):.3f}",
+            '-i', video_path,
+            '-vn',
+            '-ac', '1',
+            '-ar', str(sr),
+            '-f', 's16le',
+            '-acodec', 'pcm_s16le',
+        ]
+        if af:
+            cmd.extend(['-af', af])
+        cmd.append('pipe:1')
+
+        try:
+            proc = subprocess.run(cmd, capture_output=True)
+            if proc.returncode != 0 or not proc.stdout:
+                return np.array([], dtype=np.float32)
+            data = np.frombuffer(proc.stdout, dtype=np.int16)
+            if data.size == 0:
+                return np.array([], dtype=np.float32)
+            # Normalize to [-1, 1]
+            return (data.astype(np.float32) / 32768.0).copy()
+        except Exception:
+            return np.array([], dtype=np.float32)
+
+    def _build_audio_cleanup_filter(self) -> str | None:
+        """Return the ffmpeg filterchain used to clean extracted audio segments."""
+        if not getattr(self, '_cleanup_enabled', False):
+            return None
+        if self._cleanup_filter_string is not None:
+            return self._cleanup_filter_string
+
+        if self._cleanup_custom_filter:
+            self._cleanup_filter_string = self._cleanup_custom_filter
+            return self._cleanup_filter_string
+
+        filters: list[str] = []
+        if self._cleanup_highpass is not None:
+            filters.append(f"highpass=f={self._cleanup_highpass:g}")
+        if self._cleanup_lowpass is not None:
+            filters.append(f"lowpass=f={self._cleanup_lowpass:g}")
+        if self._cleanup_denoise:
+            filters.append(f"afftdn=nf={self._cleanup_denoise_nf:g}")
+        if self._cleanup_loudnorm:
+            filters.append(
+                f"loudnorm=I={self._cleanup_loudnorm_i:g}:TP={self._cleanup_loudnorm_tp:g}:LRA={self._cleanup_loudnorm_lra:g}:dual_mono=true"
+            )
+        if self._cleanup_extra_filters:
+            filters.extend(self._cleanup_extra_filters)
+
+        self._cleanup_filter_string = ','.join(filters) if filters else None
+        return self._cleanup_filter_string
+
+    # --- People detection (Hugging Face) ---
+    def _ensure_people_detector(self) -> None:
+        if self._people_detector is None:
+            cfg = PeopleDetectorConfig(
+                model_name=str(self.people_config.get('model_name', 'facebook/detr-resnet-50')),
+                revision=str(self.people_config.get('revision', 'no_timm')) if self.people_config.get('revision') else None,
+                score_threshold=float(self.people_config.get('score_threshold', 0.7)),
+            )
+            self._people_detector = PeopleDetector(cfg)
+
+    def _extract_frame_image(self, video_path: str, t_seconds: float) -> Image.Image | None:
+        """Extract a single video frame as PIL Image using ffmpeg at given timestamp."""
+        if t_seconds < 0:
+            return None
+        cmd = [
+            'ffmpeg', '-ss', f"{t_seconds:.3f}", '-i', video_path,
+            '-frames:v', '1', '-f', 'image2', '-vcodec', 'png', '-loglevel', 'error', 'pipe:1'
+        ]
+        try:
+            proc = subprocess.run(cmd, capture_output=True)
+            if proc.returncode != 0 or not proc.stdout:
+                return None
+            bio = io.BytesIO(proc.stdout)
+            img = Image.open(bio).convert('RGB')
+            return img
+        except Exception:
+            return None
+
+    def _get_people_count_for_clip_at(self, clip: CameraClip, event_time: float) -> int:
+        """Return people count for a clip at a specific event time (cached)."""
+        if not self._people_detection_enabled:
+            return 0
+        rel = event_time - clip.start_time
+        if rel < 0 or rel > clip.duration:
+            return 0
+        key = (clip.path, int(round(event_time)))
+        if key in self._people_counts_cache:
+            return self._people_counts_cache[key]
+        self._ensure_people_detector()
+        img = self._extract_frame_image(clip.path, max(0.0, rel))
+        if img is None:
+            self._people_counts_cache[key] = 0
+            return 0
+        try:
+            assert self._people_detector is not None
+            count = int(self._people_detector.count_people(img))
+        except Exception as exc:
+            logging.warning("People detection failed at %.2fs for %s: %s", rel, clip.path, exc)
+            count = 0
+        self._people_counts_cache[key] = count
+        return count
+
+    def _load_speech_segments(
+        self,
+        speech_segments: list[dict[str, Any]] | None,
+        speech_timeline: list[dict[str, Any]] | None,
+        camera_clips: list[CameraClip],
+    ) -> None:
+        """Transform transcription segments into event-relative intervals."""
+        self._speech_segments_event = []
+        self._has_speech_data = False
+
+        if not speech_segments or not speech_timeline or not camera_clips:
+            return
+
+        timeline_entries: list[dict[str, float]] = []
+        for entry in speech_timeline:
+            path = entry.get('path')
+            if not path:
+                continue
+            try:
+                offset = float(entry.get('offset', 0.0))
+                duration = float(entry.get('duration', 0.0))
+            except (TypeError, ValueError):
+                continue
+            timeline_entries.append({'path': path, 'offset': offset, 'duration': duration})
+
+        if not timeline_entries:
+            return
+
+        timeline_entries.sort(key=lambda item: item['offset'])
+        clip_map = {clip.path: clip for clip in camera_clips}
+
+        intervals: list[tuple[float, float]] = []
+
+        for segment in speech_segments:
+            try:
+                seg_start = float(segment.get('start', 0.0))
+                seg_end = float(segment.get('end', 0.0))
+            except (TypeError, ValueError):
+                continue
+
+            if seg_end <= seg_start:
+                continue
+
+            cursor = seg_start
+            safety = 0
+            while cursor < seg_end and safety < len(timeline_entries) + 5:
+                safety += 1
+                entry = next(
+                    (
+                        item for item in timeline_entries
+                        if item['offset'] <= cursor < item['offset'] + item['duration']
+                    ),
+                    None,
+                )
+                if not entry:
+                    break
+
+                clip = clip_map.get(entry['path'])
+                if not clip:
+                    cursor = entry['offset'] + entry['duration'] + 1e-3
+                    continue
+
+                clip_relative_start = cursor - entry['offset']
+                clip_relative_start = max(0.0, clip_relative_start)
+                clip_relative_end = min(seg_end, entry['offset'] + entry['duration']) - entry['offset']
+
+                event_start = clip.start_time + clip_relative_start
+                event_end = clip.start_time + clip_relative_end
+
+                event_start = max(event_start, clip.start_time)
+                event_end = min(event_end, clip.start_time + clip.duration)
+
+                if event_end > event_start:
+                    intervals.append((event_start, event_end))
+
+                cursor = entry['offset'] + entry['duration'] + 1e-3
+
+        if not intervals:
+            return
+
+        self._speech_segments_event = self._merge_intervals(intervals)
+        self._has_speech_data = True
+
+    @staticmethod
+    def _merge_intervals(intervals: list[tuple[float, float]]) -> list[tuple[float, float]]:
+        if not intervals:
+            return []
+        sorted_intervals = sorted(intervals, key=lambda x: x[0])
+        merged: list[tuple[float, float]] = [sorted_intervals[0]]
+        for start, end in sorted_intervals[1:]:
+            last_start, last_end = merged[-1]
+            if start <= last_end + 1e-3:
+                merged[-1] = (last_start, max(last_end, end))
+            else:
+                merged.append((start, end))
+        return merged
+
+    def _segment_has_speech(self, start: float, end: float) -> bool:
+        if not getattr(self, '_has_speech_data', False):
+            return True
+        for seg_start, seg_end in self._speech_segments_event:
+            if seg_start >= end:
+                break
+            if seg_end > start and seg_start < end:
+                return True
+        return False
+
+    @staticmethod
+    def _extract_review_segments(segments: list[CompositionSegment]) -> list[tuple[float, float]]:
+        review_intervals = [
+            (seg.start_time, seg.start_time + seg.duration)
+            for seg in segments
+            if seg.needs_review and seg.duration > 0
+        ]
+        return MultiCameraComposer._merge_intervals(review_intervals)
+
+    def _calculate_audio_quality(self, video_path: str, media_info: Any) -> float:
+        """
+        Calculate audio quality score for a video clip.
+
+        FEATURE FLAG: Uses modular implementation if use_modular_composition is enabled,
+        otherwise falls back to legacy implementation.
+
+        Uses ffmpeg to analyze audio properties like volume, noise level, etc.
+        Higher score = better quality.
+
+        Args:
+            video_path: Path to video file
+            media_info: Media info from probe
+
+        Returns:
+            float: Quality score (0.0 to 1.0, higher is better)
+        """
+        # FEATURE FLAG: Use modular quality analyzer if enabled
+        if self._use_modular_composition and self._modular_quality_analyzer:
+            return self._calculate_audio_quality_modular(video_path, media_info)
+
+        # LEGACY: Original monolithic implementation
+        return self._calculate_audio_quality_legacy(video_path, media_info)
+
+    def _calculate_audio_quality_modular(self, video_path: str, media_info: Any) -> float:
+        """
+        Calculate audio quality using modular composition architecture.
+
+        Args:
+            video_path: Path to video file
+            media_info: Media info from probe
+
+        Returns:
+            float: Quality score (0.0 to 1.0, higher is better)
+        """
+        # Check if video has audio
+        has_audio = media_info.has_audio if hasattr(media_info, 'has_audio') else (
+            hasattr(media_info, 'audio_streams') and len(media_info.audio_streams) > 0
+        )
+
+        # Analyze audio quality
+        metrics = self._modular_quality_analyzer.analyze(
+            Path(video_path),
+            has_audio=has_audio
+        )
+
+        # Calculate weighted score
+        score_result = self._modular_quality_analyzer.score(
+            metrics,
+            self._quality_weights
+        )
+
+        return score_result.overall
+
+    def _calculate_audio_quality_legacy(self, video_path: str, media_info: Any) -> float:
+        """
+        Calculate audio quality score for a video clip (LEGACY IMPLEMENTATION).
+
+        Uses ffmpeg to analyze audio properties like volume, noise level, etc.
+        Higher score = better quality.
+
+        Args:
+            video_path: Path to video file
+            media_info: Media info from probe
+
+        Returns:
+            float: Quality score (0.0 to 1.0, higher is better)
+        """
+        if not media_info.has_audio:
+            return 0.0
+
+        try:
+            command = [
+                'ffmpeg',
+                '-i', video_path,
+                '-af', 'astats=metadata=1:reset=1',
+                '-f', 'null',
+                '-'
+            ]
+
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+
+            stderr_output = result.stderr or ''
+            if result.returncode != 0 and not stderr_output:
+                logging.warning(
+                    "Audio analysis failed for %s (code %s)",
+                    video_path,
+                    result.returncode,
+                )
+                return 0.5
+
+            rms_levels: list[float] = []
+            rms_min_levels: list[float] = []
+            peak_levels: list[float] = []
+            peak_counts: list[float] = []
+
+            def _extract_trailing_number(value: str) -> float | None:
+                matches = re.findall(r"-?\d+(?:\.\d+)?", value)
+                if not matches:
+                    return None
+                try:
+                    return float(matches[-1])
+                except ValueError:
+                    return None
+
+            for raw_line in stderr_output.splitlines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+                if 'RMS level dB' in line:
+                    number = _extract_trailing_number(line)
+                    if number is not None:
+                        rms_levels.append(number)
+                if 'RMS min dB' in line:
+                    number = _extract_trailing_number(line)
+                    if number is not None:
+                        rms_min_levels.append(number)
+                if 'Peak level dB' in line:
+                    number = _extract_trailing_number(line)
+                    if number is not None:
+                        peak_levels.append(number)
+                if 'Peak count' in line:
+                    number = _extract_trailing_number(line)
+                    if number is not None:
+                        peak_counts.append(number)
+
+            if not rms_levels:
+                return 0.5
+
+            avg_rms = sum(rms_levels) / len(rms_levels)
+
+            if avg_rms >= -20:
+                rms_score = 1.0 - (avg_rms + 20) / 40
+            else:
+                rms_score = max(0.0, (avg_rms + 60) / 40)
+
+            max_peak = max(peak_levels) if peak_levels else None
+            if max_peak is None:
+                peak_score = 0.7
+            else:
+                peak_score = 1.0 - max(0.0, max_peak + 3.0) / 6.0
+
+            if rms_min_levels:
+                avg_min_rms = sum(rms_min_levels) / len(rms_min_levels)
+                dynamic_range = abs(avg_min_rms - avg_rms)
+                noise_score = (dynamic_range - 10.0) / 20.0
+            else:
+                noise_score = 0.5
+
+            if peak_counts:
+                avg_peak_count = sum(peak_counts) / len(peak_counts)
+                clip_score = 1.0 - min(1.0, avg_peak_count / 5.0)
+            else:
+                clip_score = 0.9
+
+            def clamp(value: float) -> float:
+                return max(0.0, min(1.0, value))
+
+            rms_score = clamp(rms_score)
+            peak_score = clamp(peak_score)
+            noise_score = clamp(noise_score)
+            clip_score = clamp(clip_score)
+
+            weights = self._quality_weights
+            final_score = (
+                rms_score * weights.get('rms', 0.0)
+                + peak_score * weights.get('peak', 0.0)
+                + noise_score * weights.get('noise', 0.0)
+                + clip_score * weights.get('clip', 0.0)
+            )
+
+            # If no weights were provided, fall back to RMS-driven scoring
+            if final_score == 0.0 and sum(weights.values()) == 0.0:
+                final_score = rms_score
+
+            return clamp(final_score)
+
+        except subprocess.TimeoutExpired:
+            logging.warning(f"Audio analysis timed out for {video_path}")
+            return 0.5
+        except Exception as e:
+            logging.warning(f"Could not analyze audio quality for {video_path}: {e}")
+            return 0.5
+
+    def _select_audio_source(self, camera_clips: list[CameraClip]) -> CameraClip:
+        """
+        Select the best audio source from available clips.
+
+        Args:
+            camera_clips: List of analyzed camera clips
+
+        Returns:
+            CameraClip with the best audio quality
+        """
+        if not camera_clips:
+            raise ValueError("No camera clips available for audio selection")
+
+        if self.audio_source == 'first':
+            return camera_clips[0]
+        elif self.audio_source == 'longest':
+            return max(camera_clips, key=lambda x: x.duration)
+        else:  # 'best_quality' or default
+            best_clip = max(camera_clips, key=lambda x: x.audio_quality_score)
+            logging.info(
+                f"Selected audio from {best_clip.camera} "
+                f"(quality score: {best_clip.audio_quality_score:.2f})"
+            )
+            return best_clip
+
+    def _generate_composition_timeline(
+        self,
+        camera_clips: list[CameraClip]
+    ) -> list[CompositionSegment]:
+        """
+        Generate a timeline of which camera to use at each point in time.
+
+        Args:
+            camera_clips: List of analyzed camera clips
+
+        Returns:
+            List of CompositionSegment objects defining the final video timeline
+        """
+        if self.switching_strategy == 'round_robin':
+            return self._timeline_round_robin(camera_clips)
+        elif self.switching_strategy == 'audio_quality':
+            return self._timeline_by_audio_quality(camera_clips)
+        else:  # 'time_based' or default
+            return self._timeline_time_based(camera_clips)
+
+    def _generate_aligned_timelines(
+        self,
+        camera_clips: list[CameraClip]
+    ) -> tuple[list[CompositionSegment], list[CompositionSegment]]:
+        """
+        Build overlap-aligned timelines for video and audio across the full event.
+
+        We create boundaries from all clip starts and ends, and for each interval
+        choose the best available camera for video and for audio (configurable).
+
+        Returns:
+            (video_segments, audio_segments)
+        """
+        if not camera_clips:
+            return [], []
+
+        # Build boundaries: sorted unique times (seconds from event start)
+        boundaries: list[float] = sorted({
+            0.0,
+            *[c.start_time for c in camera_clips],
+            *[c.start_time + c.duration for c in camera_clips],
+        })
+
+        # Helper state for round robin selection stability
+        rr_index = 0
+        cameras_sorted = sorted(set(c.camera for c in camera_clips))
+
+        video_segments: list[CompositionSegment] = []
+        audio_segments: list[CompositionSegment] = []
+
+        speech_people_strategy = self.switching_strategy == 'speech_people'
+
+        for i in range(len(boundaries) - 1):
+            seg_start = boundaries[i]
+            seg_end = boundaries[i + 1]
+            seg_dur = seg_end - seg_start
+            if seg_dur <= 0:
+                continue
+
+            # Cameras available at seg_start
+            avail = [c for c in camera_clips if c.start_time <= seg_start < c.start_time + c.duration]
+            if not avail:
+                continue
+
+            speech_active = True
+            available_people: list[CameraClip] = []
+            people_cameras: set = set()
+            multiple_people_angles = False
+            if speech_people_strategy:
+                speech_active = self._segment_has_speech(seg_start, seg_end)
+                if not speech_active and len(avail) > 1:
+                    # Evaluate people presence at segment midpoint for each available clip
+                    sample_t = seg_start + 0.5 * seg_dur
+                    counts: dict[str, int] = {}
+                    for c in avail:
+                        counts[c.path] = self._get_people_count_for_clip_at(c, sample_t)
+                    available_people = [c for c in avail if counts.get(c.path, 0) >= self._people_min_count]
+                    people_cameras = {c.camera for c in available_people}
+                    multiple_people_angles = len(people_cameras) >= 2
+
+            # VIDEO selection per strategy (speech-aware)
+            selected_v: CameraClip | None = None
+            if speech_people_strategy and (not speech_active) and available_people:
+                # Choose the angle with most people
+                # Recompute count lazily to avoid stale values
+                sample_t = seg_start + 0.5 * seg_dur
+                selected_v = max(available_people, key=lambda x: self._get_people_count_for_clip_at(x, sample_t))
+            if selected_v is None:
+                if self.switching_strategy == 'audio_quality':
+                    selected_v = max(avail, key=lambda x: x.audio_quality_score)
+                elif self.switching_strategy == 'round_robin':
+                    # Pick next camera in order that is available
+                    for _ in range(len(cameras_sorted)):
+                        cam = cameras_sorted[rr_index % len(cameras_sorted)]
+                        rr_index += 1
+                        match = [c for c in avail if c.camera == cam]
+                        if match:
+                            selected_v = match[0]
+                            break
+                    if not selected_v:
+                        selected_v = avail[0]
+                else:  # 'time_based' default -> prefer stability, keep previous if continuous else best audio
+                    if video_segments:
+                        last = video_segments[-1]
+                        cont = [c for c in avail if c.path == last.clip_path]
+                        if cont:
+                            selected_v = cont[0]
+                    if not selected_v:
+                        selected_v = max(avail, key=lambda x: x.audio_quality_score)
+
+            v_source_start = max(0.0, seg_start - selected_v.start_time)
+            needs_review = speech_people_strategy and (not speech_active) and multiple_people_angles
+            video_segments.append(CompositionSegment(
+                camera=selected_v.camera,
+                clip_path=selected_v.path,
+                start_time=seg_start,
+                duration=seg_dur,
+                source_start=v_source_start,
+                needs_review=needs_review,
+                speech_active=speech_active,
+            ))
+
+            # AUDIO selection
+            selected_a: CameraClip | None = None
+            if self.audio_source in ('best_quality', 'per_segment'):
+                selected_a = max(avail, key=lambda x: x.audio_quality_score)
+            elif self.audio_source == 'longest':
+                selected_a = max(avail, key=lambda x: x.duration)
+            else:  # 'first'
+                selected_a = min(avail, key=lambda x: x.start_time)
+
+            a_source_start = max(0.0, seg_start - selected_a.start_time)
+            # Apply per-clip base alignment to audio source only
+            if self._alignment_enabled and hasattr(self, '_alignment_offsets_clip') and self._alignment_offsets_clip:
+                base = self._alignment_offsets_clip.get(selected_a.path, 0.0)
+                if abs(base) > 1e-6:
+                    a_source_start = max(0.0, a_source_start + base)
+            audio_segments.append(CompositionSegment(
+                camera=selected_a.camera,
+                clip_path=selected_a.path,
+                start_time=seg_start,
+                duration=seg_dur,
+                source_start=a_source_start,
+            ))
+
+        # Merge adjacent segments with the same source to reduce cuts
+        video_segments = self._coalesce_segments(video_segments)
+        audio_segments = self._coalesce_segments(audio_segments)
+
+        return video_segments, audio_segments
+
+    def _timeline_time_based(self, camera_clips: list[CameraClip]) -> list[CompositionSegment]:
+        """
+        Create timeline by switching cameras at regular intervals.
+
+        Args:
+            camera_clips: List of camera clips
+
+        Returns:
+            List of composition segments
+        """
+        timeline = []
+        current_time = 0.0
+
+        # Calculate total event duration
+        total_duration = max(
+            clip.start_time + clip.duration
+            for clip in camera_clips
+        )
+
+        # Sort clips by camera name for consistent ordering
+        cameras_sorted = sorted(set(clip.camera for clip in camera_clips))
+        camera_index = 0
+
+        while current_time < total_duration:
+            # Find which cameras are available at current_time
+            available_clips = [
+                clip for clip in camera_clips
+                if clip.start_time <= current_time < clip.start_time + clip.duration
+            ]
+
+            if not available_clips:
+                # No clips available at this time, advance to next clip start
+                future_clips = [
+                    clip for clip in camera_clips
+                    if clip.start_time > current_time
+                ]
+                if future_clips:
+                    current_time = min(clip.start_time for clip in future_clips)
+                    continue
+                else:
+                    break
+
+            # Select next camera in rotation that's available
+            selected_clip = None
+            for _ in range(len(cameras_sorted)):
+                camera_name = cameras_sorted[camera_index % len(cameras_sorted)]
+                camera_index += 1
+
+                # Find clip from this camera
+                matching = [c for c in available_clips if c.camera == camera_name]
+                if matching:
+                    selected_clip = matching[0]
+                    break
+
+            if not selected_clip:
+                selected_clip = available_clips[0]
+
+            # Calculate segment duration
+            segment_duration = min(
+                self.switching_interval,
+                (selected_clip.start_time + selected_clip.duration) - current_time,
+                total_duration - current_time
+            )
+
+            # Calculate where to start in the source clip
+            source_start = current_time - selected_clip.start_time
+
+            timeline.append(CompositionSegment(
+                camera=selected_clip.camera,
+                clip_path=selected_clip.path,
+                start_time=current_time,
+                duration=segment_duration,
+                source_start=source_start
+            ))
+
+            current_time += segment_duration
+
+        return timeline
+
+    def _timeline_round_robin(self, camera_clips: list[CameraClip]) -> list[CompositionSegment]:
+        """
+        Create timeline by cycling through available cameras equally.
+
+        Similar to time_based but ensures equal representation of all cameras.
+        """
+        return self._timeline_time_based(camera_clips)  # For now, reuse time_based
+
+    def _timeline_by_audio_quality(self, camera_clips: list[CameraClip]) -> list[CompositionSegment]:
+        """
+        Create timeline by preferring cameras with better audio at each moment.
+        """
+        timeline = []
+        current_time = 0.0
+
+        total_duration = max(
+            clip.start_time + clip.duration
+            for clip in camera_clips
+        )
+
+        while current_time < total_duration:
+            # Find available clips at current time
+            available_clips = [
+                clip for clip in camera_clips
+                if clip.start_time <= current_time < clip.start_time + clip.duration
+            ]
+
+            if not available_clips:
+                future_clips = [
+                    clip for clip in camera_clips
+                    if clip.start_time > current_time
+                ]
+                if future_clips:
+                    current_time = min(clip.start_time for clip in future_clips)
+                    continue
+                else:
+                    break
+
+            # Select clip with best audio quality
+            selected_clip = max(available_clips, key=lambda x: x.audio_quality_score)
+
+            # Determine how long this clip is the best choice
+            segment_duration = min(
+                self.switching_interval,
+                (selected_clip.start_time + selected_clip.duration) - current_time,
+                total_duration - current_time
+            )
+
+            source_start = current_time - selected_clip.start_time
+
+            timeline.append(CompositionSegment(
+                camera=selected_clip.camera,
+                clip_path=selected_clip.path,
+                start_time=current_time,
+                duration=segment_duration,
+                source_start=source_start
+            ))
+
+            current_time += segment_duration
+
+        return timeline
+
+    def _generate_timelines_modular(
+        self,
+        camera_clips: list[CameraClip]
+    ) -> tuple[list[CompositionSegment], list[CompositionSegment]]:
+        """
+        Generate timelines using modular timeline module (Phase 3).
+
+        Args:
+            camera_clips: Legacy CameraClip objects
+
+        Returns:
+            Tuple of (video_timeline, audio_timeline) as legacy CompositionSegment lists
+        """
+        if not camera_clips:
+            return [], []
+
+        # Convert legacy CameraClip to modular CameraClip format
+        modular_clips = [
+            ModularCameraClip(
+                path=clip.path,
+                camera=clip.camera,
+                camera_id=clip.camera,  # Use camera name as ID
+                start_time=clip.start_time,
+                duration=clip.duration,
+                audio_quality_score=clip.audio_quality_score,
+                video_quality_score=clip.video_quality_score,
+                people_count=clip.people_count,
+            )
+            for clip in camera_clips
+        ]
+
+        # Convert speech segments if available
+        speech_segments = None
+        if hasattr(self, '_speaker_segments') and self._speaker_segments:
+            speech_segments = [
+                SpeechSegment(
+                    start=seg['start'],
+                    end=seg['end'],
+                    speaker=seg.get('speaker', 'Unknown')
+                )
+                for seg in self._speaker_segments
+            ]
+
+        # Generate timelines using modular architecture
+        logging.info("🔄 Using modular timeline generation (Phase 3)")
+        video_timeline_modular, audio_timeline_modular = self._timeline_generator.generate(
+            modular_clips,
+            speech_segments
+        )
+
+        # Convert modular segments to legacy CompositionSegment format
+        def to_legacy(segments):
+            return [
+                CompositionSegment(
+                    camera=seg.camera,
+                    clip_path=seg.clip_path,
+                    start_time=seg.start_time,
+                    duration=seg.duration,
+                    source_start=seg.source_start,
+                    needs_review=seg.needs_review,
+                    speech_active=seg.speech_active,
+                )
+                for seg in segments
+            ]
+
+        video_timeline = to_legacy(video_timeline_modular)
+        audio_timeline = to_legacy(audio_timeline_modular)
+
+        logging.info(
+            f"✅ Modular timeline generated: {len(video_timeline)} video segments, "
+            f"{len(audio_timeline)} audio segments"
+        )
+
+        return video_timeline, audio_timeline
+
+    def _get_people_count_for_timeline(
+        self,
+        clip: ModularCameraClip,
+        time: float
+    ) -> int:
+        """
+        People detector callable for timeline generation.
+
+        Returns people count for a clip at a specific time offset.
+        This is called by SpeechPeopleStrategy during silent segments.
+
+        Args:
+            clip: Modular camera clip
+            time: Time offset from event start (seconds)
+
+        Returns:
+            Number of people detected (0 if unavailable)
+        """
+        # Return stored people count from analysis
+        # In the future, this could sample video frames at the specific time
+        return int(clip.people_count)
+
+    def _create_composite_video(
+        self,
+        video_timeline: list[CompositionSegment],
+        audio_timeline: list[CompositionSegment],
+        output_path: str
+    ) -> bool:
+        """
+        Create the final composite video using ffmpeg based on the timeline.
+
+        Args:
+            timeline: List of composition segments
+            audio_source: Clip to use for audio
+            output_path: Output file path
+
+        Returns:
+            bool: True if successful
+        """
+        if not video_timeline:
+            logging.error("Empty timeline, cannot create composite")
+            return False
+
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                # Prefer a single-pass filter_complex pipeline to minimize IO and re-encoding
+                if self._single_pass:
+                    try:
+                        ok = self._create_composite_video_single_pass(video_timeline, audio_timeline, output_path, tmpdir)
+                        if ok:
+                            logging.info("Single-pass composition succeeded")
+                            return True
+                        else:
+                            logging.warning("Single-pass composition failed; falling back to multi-step pipeline")
+                    except Exception as exc:
+                        logging.warning("Single-pass composition raised error; falling back. %s", exc, exc_info=True)
+                # Step 1: Extract and trim video segments according to timeline
+                segment_files = []
+                for i, segment in enumerate(video_timeline):
+                    segment_path = os.path.join(tmpdir, f"segment_{i:03d}.mp4")
+
+                    # Extract segment from source clip
+                    command = [
+                        'ffmpeg',
+                        '-y',
+                        '-loglevel', 'error',
+                        '-ss', str(segment.source_start),
+                        '-i', segment.clip_path,
+                        '-t', str(segment.duration),
+                        '-c:v', 'libx264',
+                        '-preset', 'fast',
+                        '-crf', '23',
+                        '-an',  # No audio in segments (will add later)
+                        segment_path
+                    ]
+
+                    result = subprocess.run(command, capture_output=True)
+                    if result.returncode != 0:
+                        logging.error(f"Failed to extract segment {i}: {result.stderr.decode()}")
+                        return False
+
+                    segment_files.append(segment_path)
+
+                # Step 2: Concatenate video segments
+                concat_list_path = os.path.join(tmpdir, 'concat_list.txt')
+                with open(concat_list_path, 'w') as f:
+                    for seg_file in segment_files:
+                        f.write(f"file '{seg_file}'\n")
+
+                video_only_path = os.path.join(tmpdir, 'video_only.mp4')
+                command = [
+                    'ffmpeg',
+                    '-y',
+                    '-loglevel', 'error',
+                    '-f', 'concat',
+                    '-safe', '0',
+                    '-i', concat_list_path,
+                    '-c', 'copy',
+                    video_only_path
+                ]
+
+                result = subprocess.run(command, capture_output=True)
+                if result.returncode != 0:
+                    logging.error(f"Failed to concatenate segments: {result.stderr.decode()}")
+                    return False
+
+                # Optional overlay: burn timestamp in bottom-right using ASS subtitles
+                # Build overlay video path if enabled
+                overlay_input_path = video_only_path
+                need_overlay = (
+                    (self._overlay_enabled and self._event_start is not None)
+                    or bool(self._review_segments)
+                )
+                if need_overlay:
+                    total_duration = sum(s.duration for s in video_timeline)
+                    ass_path = self._overlay_generator.generate_ass_file(
+                        total_duration=total_duration,
+                        event_start=self._event_start,
+                        dst_offset_hours=self._overlay_dst_hours,
+                        include_timestamp=self._overlay_enabled and self._event_start is not None,
+                        review_segments=self._review_segments,
+                        tmpdir=tmpdir,
+                    )
+                    if ass_path:
+                        overlayed_video_path = os.path.join(tmpdir, 'video_overlay.mp4')
+                        cmd = [
+                            'ffmpeg',
+                            '-y',
+                            '-loglevel', 'error',
+                            '-i', overlay_input_path,
+                            '-vf', f"subtitles='{ass_path}'",
+                            '-c:v', 'libx264',
+                            '-preset', 'fast',
+                            '-crf', '22',
+                            overlayed_video_path
+                        ]
+                        res2 = subprocess.run(cmd, capture_output=True)
+                        if res2.returncode == 0:
+                            overlay_input_path = overlayed_video_path
+                        else:
+                            logging.warning("Failed to apply overlay subtitles, continuing without it: %s", res2.stderr.decode())
+
+                # Step 3: Extract, clean, and concatenate audio segments to span entire event
+                cleanup_filter = self._build_audio_cleanup_filter()
+                audio_seg_files = []
+                for i, segment in enumerate(audio_timeline):
+                    a_seg_path = os.path.join(tmpdir, f"audio_{i:03d}.wav")
+                    base_command = [
+                        'ffmpeg',
+                        '-y',
+                        '-loglevel', 'error',
+                        '-ss', str(segment.source_start),
+                        '-i', segment.clip_path,
+                        '-t', str(segment.duration),
+                        '-vn',
+                    ]
+
+                    command = list(base_command)
+                    current_filter = cleanup_filter
+                    if current_filter:
+                        command.extend(['-af', current_filter])
+                    command.extend([
+                        '-acodec', 'pcm_s16le',
+                        '-ar', '48000',
+                        '-ac', '2',
+                        a_seg_path
+                    ])
+
+                    result = subprocess.run(command, capture_output=True)
+                    if result.returncode != 0:
+                        if current_filter:
+                            logging.warning(
+                                "Audio cleanup filter failed for segment %d (%s); retrying without cleanup. Error: %s",
+                                i,
+                                segment.clip_path,
+                                result.stderr.decode().strip(),
+                            )
+                            self._cleanup_enabled = False
+                            self._cleanup_filter_string = None
+                            cleanup_filter = None
+                            fallback_command = list(base_command)
+                            fallback_command.extend([
+                                '-acodec', 'pcm_s16le',
+                                '-ar', '48000',
+                                '-ac', '2',
+                                a_seg_path
+                            ])
+                            result = subprocess.run(fallback_command, capture_output=True)
+                        if result.returncode != 0:
+                            logging.error(f"Failed to extract audio segment {i}: {result.stderr.decode()}")
+                            return False
+                    audio_seg_files.append(a_seg_path)
+
+                # Step 2b: Stitch audio with optional crossfades using filter_complex
+                audio_path_wav = os.path.join(tmpdir, 'audio_full.wav')
+                if len(audio_seg_files) == 1 or self._audio_crossfade_s <= 0.0:
+                    # Simple concat copy fallback (single file or disabled crossfade)
+                    audio_concat_list = os.path.join(tmpdir, 'audio_concat.txt')
+                    with open(audio_concat_list, 'w') as f:
+                        for seg_file in audio_seg_files:
+                            f.write(f"file '{seg_file}'\n")
+                    command = [
+                        'ffmpeg',
+                        '-y',
+                        '-loglevel', 'error',
+                        '-f', 'concat',
+                        '-safe', '0',
+                        '-i', audio_concat_list,
+                        '-c', 'copy',
+                        audio_path_wav
+                    ]
+                    result = subprocess.run(command, capture_output=True)
+                    if result.returncode != 0:
+                        logging.error(f"Failed to concatenate audio: {result.stderr.decode()}")
+                        return False
+                else:
+                    # Build acrossfade (with optional ducking) using AudioProcessor
+                    cmd = ['ffmpeg', '-y', '-loglevel', 'error']
+                    for seg in audio_seg_files:
+                        cmd.extend(['-i', seg])
+                    cf = max(0.01, min(5.0, self._audio_crossfade_s))
+                    mix_cfg = AudioMixConfig(
+                        crossfade_seconds=cf,
+                        curve1=self._audio_curve1,
+                        curve2=self._audio_curve2,
+                        overlap=self._audio_overlap,
+                        ducking_enabled=self._ducking_enabled,
+                        ducking_threshold=self._ducking_threshold,
+                        ducking_ratio=self._ducking_ratio,
+                        ducking_attack_ms=self._ducking_attack_ms,
+                        ducking_release_ms=self._ducking_release_ms,
+                        ducking_makeup=self._ducking_makeup,
+                    )
+                    ap = AudioProcessor(mix=mix_cfg)
+                    input_labels = [f"{i}:a" for i in range(len(audio_seg_files))]
+                    filters_str, out_label = ap.build_acrossfade_chain(
+                        input_labels,
+                        duration=cf,
+                        curve1=self._audio_curve1,
+                        curve2=self._audio_curve2,
+                        overlap=self._audio_overlap,
+                        output_label='aout',
+                    )
+                    cmd.extend([
+                        '-filter_complex', filters_str,
+                        '-map', f'[{out_label}]',
+                        '-c:a', 'pcm_s16le',
+                        audio_path_wav,
+                    ])
+                    result = subprocess.run(cmd, capture_output=True)
+                    if result.returncode != 0:
+                        logging.error(f"Audio acrossfade stitching failed: {result.stderr.decode()}")
+                        return False
+
+                # Step 4: Combine video (optionally overlayed) and audio
+                command = [
+                    'ffmpeg',
+                    '-y', '-nostdin', '-hide_banner', '-loglevel', 'error',
+                    '-i', overlay_input_path,
+                    '-i', audio_path_wav,
+                    '-c:v', 'copy',
+                    '-c:a', 'aac',
+                    '-b:a', '192k',
+                    '-movflags', '+faststart',
+                    output_path
+                ]
+
+                result = subprocess.run(command, capture_output=True, stdin=subprocess.DEVNULL)
+                if result.returncode != 0:
+                    logging.error(f"Failed to combine video and audio: {result.stderr.decode()}")
+                    return False
+
+                logging.info(f"Created composite with {len(video_timeline)} segments from {len(set(s.camera for s in video_timeline))} cameras")
+                return True
+
+        except Exception as e:
+            logging.error(f"Error creating composite video: {e}")
+            return False
+
+    # --- Performance-optimized single-pass composition ---
+    def _probe_video_dimensions(self, path: str) -> tuple[int, int]:
+        """Return (width, height) for the first video stream via ffprobe; fallback to 1920x1080."""
+        try:
+            res = subprocess.run(
+                [
+                    'ffprobe', '-v', 'error', '-hide_banner', '-select_streams', 'v:0',
+                    '-show_entries', 'stream=width,height', '-of', 'json', path
+                ],
+                capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL
+            )
+            data = json.loads(res.stdout or '{}')
+            streams = data.get('streams') or []
+            if streams:
+                w = int(streams[0].get('width') or 1920)
+                h = int(streams[0].get('height') or 1080)
+                # enforce even dimensions
+                w -= (w % 2)
+                h -= (h % 2)
+                return max(2, w), max(2, h)
+        except Exception:
+            pass
+        return 1920, 1080
+
+    def _probe_has_audio(self, path: str) -> bool:
+        """Return True if input has at least one audio stream."""
+        try:
+            res = subprocess.run(
+                [
+                    'ffprobe', '-v', 'error', '-hide_banner', '-select_streams', 'a',
+                    '-show_entries', 'stream=index', '-of', 'csv=p=0', path
+                ],
+                capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL
+            )
+            out = (res.stdout or '').strip()
+            return bool(out)
+        except Exception:
+            return True  # assume yes to avoid over-restricting
+
+    @staticmethod
+    def _escape_subtitles_path(path: str) -> str:
+        """Escape path for ffmpeg subtitles filter usage."""
+        # Escape backslashes and single quotes
+        return path.replace('\\', r'\\').replace("'", r"\'")
+
+    def _video_codec_args(self) -> list[str]:
+        """Return ffmpeg args for chosen video encoder."""
+        if self._use_hw_encode:
+            # Hardware encoder (macOS videotoolbox). Use bitrate-based control.
+            return [
+                '-c:v', self._hw_codec,
+                '-b:v', self._target_bitrate,
+                '-pix_fmt', 'yuv420p',
+            ]
+        # x264 software encoder
+        return [
+            '-c:v', 'libx264',
+            '-preset', self._x264_preset,
+            '-crf', self._x264_crf,
+            '-pix_fmt', 'yuv420p',
+        ]
+
+    def _create_composite_video_single_pass(
+        self,
+        video_timeline: list[CompositionSegment],
+        audio_timeline: list[CompositionSegment],
+        output_path: str,
+        tmpdir: str,
+    ) -> bool:
+        """Compose using one ffmpeg -filter_complex (trim+concat video, trim+xfade audio, optional overlay)."""
+        if not video_timeline:
+            return False
+
+        # Determine unique inputs and index mapping
+        unique_paths: list[str] = []
+        index_by_path: dict[str, int] = {}
+        def _add(p: str):
+            if p not in index_by_path:
+                index_by_path[p] = len(unique_paths)
+                unique_paths.append(p)
+        for seg in video_timeline:
+            _add(seg.clip_path)
+        for seg in audio_timeline:
+            _add(seg.clip_path)
+
+        # Probe a reference resolution from the first video segment
+        ref_w, ref_h = self._probe_video_dimensions(video_timeline[0].clip_path)
+
+        # Overlay ASS if needed
+        need_overlay = (self._overlay_enabled and self._event_start is not None) or bool(self._review_segments)
+        ass_path = None
+        if need_overlay:
+            total_duration = sum(s.duration for s in video_timeline)
+            ass_path = self._overlay_generator.generate_ass_file(
+                total_duration=total_duration,
+                event_start=self._event_start,
+                dst_offset_hours=self._overlay_dst_hours,
+                include_timestamp=self._overlay_enabled and self._event_start is not None,
+                review_segments=self._review_segments,
+                tmpdir=tmpdir,
+            )
+
+        # Build filter graph
+        filters: list[str] = []
+
+        # Video trims
+        v_labels: list[str] = []
+        for idx, seg in enumerate(video_timeline):
+            ip = index_by_path[seg.clip_path]
+            start = max(0.0, seg.source_start)
+            end = start + max(0.0, seg.duration)
+            vlab = f"v{idx}"
+            v_labels.append(vlab)
+            filters.append(
+                f"[{ip}:v]trim=start={start:.3f}:end={end:.3f},setpts=PTS-STARTPTS,"
+                f"scale={ref_w}:{ref_h}:force_original_aspect_ratio=decrease,"
+                f"pad={ref_w}:{ref_h}:(({ref_w}-iw)/2):(({ref_h}-ih)/2):color=black,format=yuv420p,setsar=1[{vlab}]"
+            )
+
+        # Video concat
+        v_inputs = ''.join(f'[{label}]' for label in v_labels)
+        filters.append(f"{v_inputs}concat=n={len(v_labels)}:v=1:a=0[vcat]")
+        if ass_path:
+            ass_escaped = self._escape_subtitles_path(ass_path)
+            filters.append(f"[vcat]subtitles='{ass_escaped}'[vout]")
+            vout = 'vout'
+        else:
+            vout = 'vcat'
+
+        # Audio trims
+        a_labels: list[str] = []
+        # Cache which input has audio
+        has_audio_map: dict[str, bool] = {p: self._probe_has_audio(p) for p in unique_paths}
+        for idx, seg in enumerate(audio_timeline):
+            ip = index_by_path[seg.clip_path]
+            start = max(0.0, seg.source_start)
+            end = start + max(0.0, seg.duration)
+            alab = f"a{idx}"
+            a_labels.append(alab)
+            if has_audio_map.get(unique_paths[ip], True):
+                filters.append(f"[{ip}:a]atrim=start={start:.3f}:end={end:.3f},asetpts=PTS-STARTPTS[{alab}]")
+            else:
+                dur = max(0.0, seg.duration)
+                filters.append(f"anullsrc=r=48000:cl=stereo,atrim=duration={dur:.3f},asetpts=PTS-STARTPTS[{alab}]")
+
+        # Audio stitch: acrossfade ladder or concat
+        if not a_labels:
+            # If no audio timeline, create silent audio to keep mux stable
+            filters.append("anullsrc=r=48000:cl=stereo[asilent]")
+            aout = 'asilent'
+        elif len(a_labels) == 1 or self._audio_crossfade_s <= 0.0:
+            a_inputs = ''.join(f'[{label}]' for label in a_labels)
+            filters.append(f"{a_inputs}concat=n={len(a_labels)}:v=0:a=1[acat]")
+            aout = 'acat'
+        else:
+            # Build acrossfade (with optional ducking) using AudioProcessor
+            cf = max(0.01, min(5.0, self._audio_crossfade_s))
+            mix_cfg = AudioMixConfig(
+                crossfade_seconds=cf,
+                curve1=self._audio_curve1,
+                curve2=self._audio_curve2,
+                overlap=self._audio_overlap,
+                ducking_enabled=self._ducking_enabled,
+                ducking_threshold=self._ducking_threshold,
+                ducking_ratio=self._ducking_ratio,
+                ducking_attack_ms=self._ducking_attack_ms,
+                ducking_release_ms=self._ducking_release_ms,
+                ducking_makeup=self._ducking_makeup,
+            )
+            ap = AudioProcessor(mix=mix_cfg)
+            filters_str, aout = ap.build_acrossfade_chain(
+                a_labels,
+                duration=cf,
+                curve1=self._audio_curve1,
+                curve2=self._audio_curve2,
+                overlap=self._audio_overlap,
+                output_label='afx',
+            )
+            filters.append(filters_str)
+
+        # Optional audio cleanup after stitching
+        a_cleanup = self._build_audio_cleanup_filter()
+        if a_cleanup and aout:
+            filters.append(f"[{aout}]{a_cleanup}[aout]")
+            aout = 'aout'
+
+        # Assemble command
+        cmd: list[str] = ['ffmpeg', '-y', '-loglevel', 'error']
+        for p in unique_paths:
+            cmd.extend(['-i', p])
+        cmd.extend([
+            '-filter_complex', '; '.join(filters),
+            '-map', f'[{vout}]',
+            '-map', f'[{aout}]',
+        ])
+        # Video codec args
+        cmd.extend(self._video_codec_args())
+        # Audio encode
+        cmd.extend(['-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2', '-movflags', '+faststart', output_path])
+
+        res = subprocess.run(cmd, capture_output=True)
+        if res.returncode != 0:
+            logging.error("Single-pass ffmpeg failed: %s", (res.stderr or b'').decode(errors='ignore')[:1000])
+            return False
+        return True
+
+    def _simple_copy(self, video_clips: list[dict[str, Any]], output_path: str) -> bool:
+        """
+        Simple copy of a single video file.
+        """
+        if not video_clips:
+            return False
+
+        source = video_clips[0]['path']
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+        command = [
+            'ffmpeg',
+            '-y',
+            '-loglevel', 'error',
+            '-i', source,
+            '-c', 'copy',
+            output_path
+        ]
+
+        result = subprocess.run(command)
+        return result.returncode == 0
+
+    def _sequential_merge(self, video_clips: list[dict[str, Any]], output_path: str) -> bool:
+        """
+        Sequential merge of clips from the same camera (fallback behavior).
+        """
+        from blink_pipeline.video import merge_video_clips
+
+        video_paths = [clip['path'] for clip in sorted(video_clips, key=lambda x: x['datetime'])]
+        crossfade = self.config.get('video_processing', {}).get('crossfade_duration', 0.5)
+
+        return merge_video_clips(video_paths, output_path, crossfade)
+
+    @staticmethod
+    def _coalesce_segments(segments: list[CompositionSegment]) -> list[CompositionSegment]:
+        """Merge adjacent segments that use the same source to reduce cuts."""
+        if not segments:
+            return []
+        merged: list[CompositionSegment] = []
+        current = segments[0]
+        for seg in segments[1:]:
+            # If contiguous and from same source clip, extend
+            if (
+                seg.clip_path == current.clip_path and
+                seg.needs_review == current.needs_review and
+                seg.speech_active == current.speech_active and
+                abs((seg.start_time) - (current.start_time + current.duration)) < 1e-3
+            ):
+                current.duration += seg.duration
+            else:
+                merged.append(current)
+                current = seg
+        merged.append(current)
+        return merged
+
+    def _generate_timestamp_ass(
+        self,
+        tmpdir: str,
+        total_duration: float,
+        event_start: datetime | None,
+        dst_offset_hours: int = 1,
+        include_timestamp: bool = True,
+        review_segments: list[tuple[float, float]] | None = None,
+    ) -> str | None:
+        """Generate an ASS subtitle file for timestamps and review indicators."""
+        has_timestamp = include_timestamp and event_start is not None
+        review_segments = review_segments or []
+        has_review = bool(review_segments)
+
+        if not has_timestamp and not has_review:
+            return None
+
+        try:
+            ass_lines: list[str] = []
+            ass_lines.append("[Script Info]")
+            ass_lines.append("ScriptType: v4.00+")
+            ass_lines.append("PlayResX: 1920")
+            ass_lines.append("PlayResY: 1080")
+            ass_lines.append("")
+            ass_lines.append("[V4+ Styles]")
+            ass_lines.append("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding")
+
+            if has_timestamp:
+                timestamp_style = (
+                    f"Style: Overlay,{self._overlay_font},{self._overlay_font_size},&H00FFFFFF,&H000000FF,&H55000000,&H00000000,0,0,0,0,100,100,0,0,1,2,0,3,20,{self._overlay_margin_r},{self._overlay_margin_v},1"
+                )
+                ass_lines.append(timestamp_style)
+
+            if has_review:
+                review_style = (
+                    f"Style: ReviewIndicator,{self._overlay_font},{int(self._overlay_font_size * 0.9)},&H00FFFFFF,&H000000FF,&H702151FF,&H00000000,0,0,0,0,100,100,0,0,1,2,0,9,20,{self._overlay_margin_r},{max(10, self._overlay_margin_v)},1"
+                )
+                ass_lines.append(review_style)
+
+            ass_lines.append("")
+            ass_lines.append("[Events]")
+            ass_lines.append("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text")
+
+            def fmt_ass_time(seconds: float) -> str:
+                seconds = max(0.0, seconds)
+                h = int(seconds // 3600)
+                m = int((seconds % 3600) // 60)
+                s = int(seconds % 60)
+                cs = int(round((seconds - int(seconds)) * 100))
+                return f"{h:d}:{m:02d}:{s:02d}.{cs:02d}"
+
+            if has_timestamp:
+                total_secs = int(max(0, int(total_duration + 0.5)))
+                base = event_start + timedelta(hours=dst_offset_hours)  # type: ignore[operator]
+                for t in range(0, total_secs):
+                    wall = base + timedelta(seconds=t)
+                    text = wall.strftime("%Y-%m-%d %H:%M:%S")
+                    start_ts = fmt_ass_time(t)
+                    end_ts = fmt_ass_time(t + 1)
+                    ass_lines.append(f"Dialogue: 0,{start_ts},{end_ts},Overlay,,0000,0000,0000,,{text}")
+
+            if has_review:
+                for start, end in review_segments:
+                    clamped_start = max(0.0, min(total_duration, start))
+                    clamped_end = max(clamped_start + 0.1, min(total_duration, end))
+                    start_ts = fmt_ass_time(clamped_start)
+                    end_ts = fmt_ass_time(clamped_end)
+                    ass_lines.append(
+                        f"Dialogue: 1,{start_ts},{end_ts},ReviewIndicator,,0000,0000,0000,,REVIEW ALT ANGLES"
+                    )
+
+            ass_path = os.path.join(tmpdir, 'overlay.ass')
+            with open(ass_path, 'w', encoding='utf-8') as fh:
+                fh.write("\n".join(ass_lines))
+            return ass_path
+        except Exception as exc:  # pragma: no cover - file IO errors
+            logging.warning("Failed to generate ASS overlay: %s", exc)
+            return None

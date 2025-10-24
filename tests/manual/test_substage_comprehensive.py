@@ -6,7 +6,7 @@ This test shows the complete workflow with queue time vs. processing time.
 """
 
 import time
-from src.pipeline_dashboard import PipelineDashboard
+from blink_pipeline.pipeline_dashboard import PipelineDashboard
 
 def main():
     """Demonstrate substage timing feature comprehensively."""

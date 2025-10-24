@@ -18,7 +18,7 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from src.logging_config import PipelineLogger, configure_worker_logging
+from blink_pipeline.logging_config import PipelineLogger, configure_worker_logging
 
 def test_basic_logging():
     """Test basic logging functionality."""
@@ -28,14 +28,13 @@ def test_basic_logging():
 
     # Create logger
     logger_system = PipelineLogger(log_dir="logs_test", log_level="DEBUG")
-    logger = logger_system.get_logger()
 
     # Test different log levels
-    logger.debug("This is a DEBUG message - very detailed")
-    logger.info("This is an INFO message - general information")
-    logger.warning("This is a WARNING message - potential issue")
-    logger.error("This is an ERROR message - something failed")
-    logger.critical("This is a CRITICAL message - severe failure")
+    logging.getLogger("pipeline").debug("This is a DEBUG message - very detailed")
+    logging.getLogger("pipeline").info("This is an INFO message - general information")
+    logging.getLogger("pipeline").warning("This is a WARNING message - potential issue")
+    logging.getLogger("pipeline").error("This is an ERROR message - something failed")
+    logging.getLogger("pipeline").critical("This is a CRITICAL message - severe failure")
 
     print("\n✓ Basic logging test complete")
     print(f"  Check logs_test/ directory for log files")
@@ -75,7 +74,6 @@ def test_exception_logging():
     print("="*80)
 
     logger_system = PipelineLogger(log_dir="logs_test", log_level="DEBUG")
-    logger = logger_system.get_logger()
 
     # Test exception logging
     try:
@@ -94,10 +92,9 @@ def test_worker_logging():
     # Configure worker logging
     configure_worker_logging("logs_test")
 
-    logger = logging.getLogger("pipeline.worker.test")
-    logger.info("This is a worker log message")
-    logger.debug("This is a debug message from worker")
-    logger.error("This is an error from worker")
+    logging.getLogger("pipeline.worker.test").info("This is a worker log message")
+    logging.getLogger("pipeline.worker.test").debug("This is a debug message from worker")
+    logging.getLogger("pipeline.worker.test").error("This is an error from worker")
 
     print("\n✓ Worker logging configuration test complete")
 
