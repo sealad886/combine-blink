@@ -197,7 +197,9 @@ class PipelineLogger:
 
     def log_exception(self, context: str, exc: Exception):
         """Log an exception with full traceback."""
-        logging.getLogger("pipeline").error(f"Exception in {context}: {type(exc).__name__}: {exc}", exc_info=True)
+        logging.getLogger("pipeline").error(
+            "Exception in %s: %s: %s", context, type(exc).__name__, exc, exc_info=exc
+        )
 
     def get_logger(self, name: str = "pipeline") -> logging.Logger:
         """Get a logger instance."""
