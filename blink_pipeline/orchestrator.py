@@ -52,9 +52,6 @@ def setup_directories(config):
     os.makedirs(os.path.join(output_dir, config['paths']['transcripts_dir']), exist_ok=True)
     os.makedirs(os.path.join(output_dir, config['paths']['speakers_dir']), exist_ok=True)
 
-def _format_hms(seconds: float) -> str:
-    return str(timedelta(seconds=int(seconds)))
-
 
 def _generate_group_name(group: list[dict[str, Any]]) -> str:
     """

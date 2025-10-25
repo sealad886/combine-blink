@@ -8,7 +8,13 @@ import numpy as np
 
 
 def _cache_wav_path(video_path: str, sr: int, base_dir: str | None) -> Path:
-    h8 = hashlib.md5(os.path.abspath(video_path).encode("utf-8")).hexdigest()[:8]
+    """Generate cache path for audio extraction.
+
+    Uses BLAKE2s (8 hex) hash of absolute path for collision resistance.
+    """
+    abs_src = os.path.abspath(video_path)
+    # 4-byte BLAKE2s -> 8 hex chars, good balance of brevity vs collisions
+    h8 = hashlib.blake2s(abs_src.encode("utf-8"), digest_size=4).hexdigest()
     out_dir = Path(base_dir or os.path.join("output","audio_cache"))
     out_dir.mkdir(parents=True, exist_ok=True)
     stem = Path(video_path).stem

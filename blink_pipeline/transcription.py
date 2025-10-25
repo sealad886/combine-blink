@@ -72,6 +72,14 @@ def process_audio_for_transcription(
     if use_enhancement:
         try:
             from blink_pipeline.audio_enhancement import AudioEnhancer
+            # Resolve cache_dir relative to output_dir (like other cache dirs)
+            paths_config = config.get("paths", {})
+            output_dir = paths_config.get("output_dir", "output")
+            audio_cache_subdir = paths_config.get("audio_cache_dir", "enhanced_audio_cache")
+            # Construct full path: output_dir/audio_cache_dir
+            audio_cache_dir = os.path.join(output_dir, audio_cache_subdir)
+            # Inject cache_dir into audio_enhancement config
+            audio_enhancement_config["cache_dir"] = audio_cache_dir
             enhancer = AudioEnhancer(audio_enhancement_config)
             logging.info("Audio enhancement enabled for transcription")
         except Exception as e:

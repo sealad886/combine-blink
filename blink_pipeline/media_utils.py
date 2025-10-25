@@ -18,8 +18,15 @@ class MediaInfo:
 
 
 def build_repair_cache_path(video_path: str, cache_dir: str, strategy: str) -> Path:
-    """Return canonical cache path for a repaired video."""
-    path_hash = hashlib.md5(video_path.encode("utf-8")).hexdigest()[:8]
+    """Return canonical cache path for a repaired video.
+
+    Uses BLAKE2s hash of the absolute path for collision resistance
+    while maintaining stable 8-character hex identifiers.
+    """
+    # Hash absolute path for stability across working directories
+    abs_src = str(Path(video_path).resolve())
+    # 4-byte BLAKE2s -> 8 hex chars, good balance of brevity vs collisions
+    path_hash = hashlib.blake2s(abs_src.encode("utf-8"), digest_size=4).hexdigest()
     filename = f"repaired_{strategy}_{Path(video_path).stem}_{path_hash}.mp4"
     return Path(cache_dir) / filename
 

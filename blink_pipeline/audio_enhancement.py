@@ -73,7 +73,6 @@ class AudioEnhancer:
             config: Audio enhancement configuration dictionary with structure:
                 {
                     "enabled": bool,
-                    "cache_dir": str,
                     "deepfilternet": {
                         "enabled": bool,
                         "model": str,  # "DeepFilterNet", "DeepFilterNet2", "DeepFilterNet3"
@@ -90,8 +89,12 @@ class AudioEnhancer:
                         "vad_threshold": float
                     }
                 }
+
+            Note: Cache directory is now read from config["paths"]["audio_cache_dir"]
+                  and falls back to "output/enhanced_audio_cache" if not found.
         """
         self.config = config
+        # Cache directory is now in paths.audio_cache_dir, not audio_enhancement.cache_dir
         self.cache_dir = config.get("cache_dir", "output/enhanced_audio_cache")
         self.df_config = config.get("deepfilternet", {})
         self.vad_config = config.get("vad_pregain", {})
@@ -128,11 +131,18 @@ class AudioEnhancer:
             "vad_threshold": self.vad_config.get("vad_threshold"),
         }
         config_str = json.dumps(key_params, sort_keys=True)
+        # Config hash can remain MD5 since it's for config text, not paths
         return hashlib.md5(config_str.encode("utf-8")).hexdigest()[:8]
 
     def _build_cache_path(self, video_path: str) -> Path:
-        """Generate cache path for enhanced audio."""
-        path_hash = hashlib.md5(video_path.encode("utf-8")).hexdigest()[:8]
+        """Generate cache path for enhanced audio.
+
+        Uses BLAKE2s (8 hex) hash of absolute path for collision resistance.
+        """
+        # Hash absolute path for stability across working directories
+        abs_src = str(Path(video_path).resolve())
+        # 4-byte BLAKE2s -> 8 hex chars, good balance of brevity vs collisions
+        path_hash = hashlib.blake2s(abs_src.encode("utf-8"), digest_size=4).hexdigest()
         filename = f"enhanced_{self.config_hash}_{Path(video_path).stem}_{path_hash}.wav"
         return Path(self.cache_dir) / filename
 

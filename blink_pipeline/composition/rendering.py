@@ -64,7 +64,7 @@ class CompositionRenderer(ABC):
     # --- Shared helpers ---
     def _video_codec_args(self) -> List[str]:
         """Return ffmpeg args for chosen video encoder based on config.encoding.
-        
+
         MPS Optimization: VideoToolbox on Apple Silicon supports constant quality mode
         (-q:v) since FFmpeg 4.4+, which provides better quality/speed tradeoff than
         bitrate mode. Use -q:v 50-70 for excellent quality (higher = better, 1-100 scale).
@@ -73,20 +73,20 @@ class CompositionRenderer(ABC):
         if getattr(enc, 'use_hw_encode', True):
             # Hardware encoder (macOS videotoolbox on Apple Silicon by default)
             codec = getattr(enc, 'hw_codec', 'h264_videotoolbox') or 'h264_videotoolbox'
-            
+
             # MPS Optimization: Use constant quality mode if quality value specified
             # Otherwise fall back to bitrate mode for backward compatibility
             quality = getattr(enc, 'quality', None)  # -q:v value (1-100, higher=better)
-            
+
             args = ['-c:v', codec]
-            
+
             # MPS Optimization: Add VideoToolbox-specific performance flags
             # -realtime 0: Disable realtime mode for better quality (default is 1)
             # -allow_sw 1: Allow software fallback if hardware unavailable
             # -require_sw 0: Prefer hardware encoding
             if 'videotoolbox' in codec:
                 args.extend(['-realtime', '0', '-allow_sw', '1'])
-            
+
             if quality is not None and 1 <= quality <= 100:
                 # Constant quality mode (recommended for Apple Silicon)
                 args.extend(['-q:v', str(int(quality))])
@@ -94,14 +94,14 @@ class CompositionRenderer(ABC):
                 # Bitrate mode (legacy compatibility)
                 bitrate = getattr(enc, 'bitrate', '8000k') or '8000k'
                 args.extend(['-b:v', str(bitrate)])
-            
+
             # MPS Optimization: Use optimal pixel format for VideoToolbox
             # p010le for 10-bit quality on newer hardware, yuv420p for compatibility
             pix_fmt = getattr(enc, 'pix_fmt', 'yuv420p') or 'yuv420p'
             args.extend(['-pix_fmt', pix_fmt])
-            
+
             return args
-        
+
         # Software x264 fallback
         preset = getattr(enc, 'x264_preset', None) or 'veryfast'
         crf = getattr(enc, 'x264_crf', None) or 22
@@ -191,15 +191,21 @@ class SinglePassRenderer(CompositionRenderer):
         if not timeline:
             return False
 
-        # Determine unique input paths across timeline
+        # Determine unique input paths across timeline (include possible audio-only sources)
         unique_paths: List[str] = []
         index_by_path: Dict[str, int] = {}
-        def _add(p: str):
+        def _add(p: Optional[str]):
+            if not p:
+                return
             if p not in index_by_path:
                 index_by_path[p] = len(unique_paths)
                 unique_paths.append(p)
         for seg in timeline:
             _add(str(getattr(seg, 'clip_path')))
+            # Include audio-only sources when audio is decoupled
+            a_path = getattr(seg, 'audio_clip_path', None)
+            if a_path and a_path != getattr(seg, 'clip_path'):
+                _add(str(a_path))
 
         # Probe reference resolution
         ref_w, ref_h = self._probe_video_dimensions(unique_paths[0])
@@ -252,8 +258,15 @@ class SinglePassRenderer(CompositionRenderer):
         a_labels: List[str] = []
         has_audio_map: Dict[str, bool] = {p: self._probe_has_audio(p) for p in unique_paths}
         for idx, seg in enumerate(timeline):
-            ip = index_by_path[str(getattr(seg, 'clip_path'))]
-            start = float(getattr(seg, 'source_start', 0.0))
+            # Use decoupled audio source if specified
+            audio_path = getattr(seg, 'audio_clip_path', None) or str(getattr(seg, 'clip_path'))
+            if audio_path not in index_by_path:
+                # Safety: add on-the-fly (should be rare if above collected correctly)
+                index_by_path[audio_path] = len(unique_paths)
+                unique_paths.append(audio_path)
+                has_audio_map[audio_path] = self._probe_has_audio(audio_path)
+            ip = index_by_path[audio_path]
+            start = float(getattr(seg, 'audio_source_start', getattr(seg, 'source_start', 0.0)))
             dur = float(getattr(seg, 'duration'))
             end = max(0.0, start + dur)
             alab = f"a{idx}"
@@ -356,7 +369,7 @@ class MultiPassRenderer(CompositionRenderer):
             # This leverages multiple cores on Apple Silicon for faster I/O operations
             segment_files: List[Path] = []
             max_workers = min(4, len(timeline))  # Limit to 4 parallel extractions
-            
+
             def extract_segment(args):
                 """Extract a single video segment."""
                 idx, seg = args
@@ -376,7 +389,7 @@ class MultiPassRenderer(CompositionRenderer):
                     logger.error(snippet)
                     return None
                 return (idx, seg_path)
-            
+
             # Execute extractions in parallel
             segment_map = {}
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -386,7 +399,7 @@ class MultiPassRenderer(CompositionRenderer):
                     if result:
                         idx, seg_path = result
                         segment_map[idx] = seg_path
-            
+
             # Build ordered segment list
             for i in range(len(timeline)):
                 if i in segment_map:
@@ -456,19 +469,22 @@ class MultiPassRenderer(CompositionRenderer):
                     pass
             logger.info("MultiPass | step=extract_audio | segments=%d", len(timeline))
             cleanup_filter = self.audio_processor.build_cleanup_filter()
-            
+
             # MPS OPTIMIZATION: Extract audio segments in parallel
             audio_seg_files: List[Path] = []
             max_audio_workers = min(4, len(timeline))
-            
+
             def extract_audio_segment(args):
                 """Extract a single audio segment."""
                 idx, seg = args
                 a_seg = tmp / f"audio_{idx:03d}.wav"
+                # Decoupled audio: choose audio clip path and start if provided
+                a_path = getattr(seg, 'audio_clip_path', None) or str(getattr(seg, 'clip_path'))
+                a_start = float(getattr(seg, 'audio_source_start', getattr(seg, 'source_start', 0.0)))
                 cmd = [
                     'ffmpeg', '-y', '-nostdin', '-loglevel', 'error',
-                    '-ss', f"{float(getattr(seg, 'source_start', 0.0)):.3f}",
-                    '-i', str(getattr(seg, 'clip_path')),
+                    '-ss', f"{a_start:.3f}",
+                    '-i', str(a_path),
                     '-t', f"{float(getattr(seg, 'duration', 0.0)):.3f}",
                     '-vn'
                 ]
@@ -482,7 +498,7 @@ class MultiPassRenderer(CompositionRenderer):
                     logger.error(snippet)
                     return None
                 return (idx, a_seg)
-            
+
             # Execute audio extractions in parallel
             audio_map = {}
             with ThreadPoolExecutor(max_workers=max_audio_workers) as executor:
@@ -492,7 +508,7 @@ class MultiPassRenderer(CompositionRenderer):
                     if result:
                         idx, a_seg = result
                         audio_map[idx] = a_seg
-            
+
             # Build ordered audio segment list
             for i in range(len(timeline)):
                 if i in audio_map:

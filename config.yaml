@@ -4,6 +4,7 @@ paths:
   videos_dir: merged_videos
   transcripts_dir: transcripts
   speakers_dir: speaker_voice_samples
+  audio_cache_dir: enhanced_audio_cache
 discovery:
   filename_pattern: (\d{2}-\d{2}-\d{2})_([a-zA-Z0-9]+)G.+\.mp4
   date_folder_patterns:
@@ -94,7 +95,7 @@ multi_camera_composition:
   people_detection:
     enabled: true
     backend: vision              # 'auto', 'vision', or 'huggingface'
-    sample_frames: 12           # Slightly fewer frames for speed on Apple Silicon
+    sample_frames: 6           # Slightly fewer frames for speed on Apple Silicon
     resize_width: 480          # Keeps MPS fast while preserving detail (HuggingFace only)
     min_frame_width: 320       # Minimum width to avoid undersized frames
     # HuggingFace backend options:
@@ -110,14 +111,14 @@ multi_camera_composition:
   # MPS optimization: Reduced window/hop for faster processing; alignment is CPU-bound (numpy)
   audio_alignment:
     enabled: true
-    max_shift_seconds: 1.5          # Maximum shift to apply (prevents overcorrection)
+    max_shift_seconds: 3.0          # Maximum shift to apply (prevents overcorrection)
     analysis_window_seconds: 12.0   # Reduced from 12s for faster processing (still accurate)
     hop_seconds: 6.0                # Reduced from 6s for faster multi-window analysis
     sample_rate: 48000              # Downsample rate for faster cross-correlation
     bandpass: true                  # Apply bandpass filter to focus on speech frequencies
     highpass_hz: 80                # High-pass filter cutoff (removes low rumble)
-    lowpass_hz: 8000                # Low-pass filter cutoff (removes high noise)
-    estimate_drift: true            # Estimate slow drift (seconds per second) and correct in audio
+    lowpass_hz: 4000                # Low-pass filter cutoff (removes high noise)
+    estimate_drift: false            # Estimate slow drift (seconds per second) and correct in audio
 
   # Burn date/time overlay in bottom-right; Blink files are often off by 1 hour (DST)
   timestamp_overlay:
@@ -137,21 +138,21 @@ multi_camera_composition:
     # with excellent quality. Falls back to software if hardware encoder unavailable.
     use_hw_encode: true         # Enable hardware encoding on macOS (h264_videotoolbox)
     hw_codec: h264_videotoolbox # VideoToolbox for Apple Silicon/Intel Macs
-    
+
     # MPS OPTIMIZATION: Use constant quality mode for better speed/quality tradeoff
     # quality: 1-100 scale (higher = better quality)
     #   - 50-60: Fast, good quality for previews
     #   - 65-75: Excellent quality, recommended for final output
     #   - 80+: Near-lossless, larger file sizes
     # If not set, falls back to bitrate mode (below) for backward compatibility
-    quality: 70                 # Constant quality mode (FFmpeg 4.4+)
-    
+    quality: 50                 # Constant quality mode (FFmpeg 4.4+)
+
     # Legacy bitrate mode (used only if quality not set)
-    bitrate: 8000k              # VideoToolbox target: 8Mbps for excellent 1080p quality (up from 6Mbps)
-    
+    # bitrate: 8000k              # VideoToolbox target: 8Mbps for excellent 1080p quality (up from 6Mbps)
+
     # Pixel format: yuv420p (compatible) or p010le (10-bit, newer Macs only)
     pix_fmt: yuv420p           # Compatible pixel format for all devices
-    
+
     # Software encoding fallback settings (rarely used when VideoToolbox available)
     x264_preset: null         # Software fallback: 'faster' balances speed/quality (upgrade from 'veryfast')
     x264_crf: null              # Software fallback: CRF 20 for higher quality (down from 22)
@@ -203,7 +204,7 @@ transcription:
     # For non-Core ML (CPU/GPU/Metal):
     #   ggml_model_path: /path/to/whisper.cpp/models/ggml-medium.en.bin  # Standard GGML model
     #   device: auto  # or cpu, cuda, metal
-    ggml_model_path: /Users/andrew/zzCoding-play/whisper.cpp/models/ggml-large-v3-turbo.bin
+    ggml_model_path: /Users/andrew/zzCoding-play/whisper.cpp/models/ggml-large-v3-turbo-encoder.mlmodelc
 
     # Path to whisper.cpp binary (auto-detected if in PATH or standard locations)
     # Leave commented out for auto-detection, or specify explicit path:
@@ -232,15 +233,11 @@ transcription:
 #
 # This is separate from audio_cleanup (Stage 5) which handles composition audio.
 # Enhancement happens once per clip before transcription and is cached.
+# Cache directory is configured in paths.audio_cache_dir
 audio_enhancement:
   # Master enable/disable switch
   # Set to false to skip all audio enhancement (faster, lower quality transcription)
   enabled: true
-
-  # Cache directory for enhanced audio files
-  # Enhanced audio is cached to avoid reprocessing on subsequent runs
-  # Cache is invalidated when configuration changes
-  cache_dir: output/enhanced_audio_cache
 
   # DeepFilterNet Settings
   # Neural network-based noise reduction for speech enhancement
@@ -333,7 +330,7 @@ speaker_identification:
   - HUGGINGFACE_TOKEN
   # MPS optimization: Use 'mps' device for Apple Silicon GPU acceleration
   # Options: 'cpu', 'cuda', 'mps' (Apple Silicon), 'GPU' (auto-detect)
-  device: mps
+  device: auto
   # Prefer MPS over CUDA on macOS when device is 'auto'
   prefer_mps_on_mac: true
   similarity_threshold: 0.68
@@ -349,7 +346,7 @@ concurrency:
   # Stage 3: Transcription and diarization (compute-bound, uses AI models)
   # Keep at 2 to avoid memory pressure; Core ML and MPS models use significant unified memory
   # Each worker loads Whisper + diarization models (~4-6GB per worker)
-  transcription_workers: 2
+  transcription_workers: 1
 
   # Stage 5: Video merging and composition (I/O-bound, uses ffmpeg with VideoToolbox)
   # MPS OPTIMIZATION: Increased to 4 for parallel hardware encoding

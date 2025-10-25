@@ -37,7 +37,7 @@ cached before the heavy transcription work begins. Implementation lives in
 
 - Location: `transcription.repair_cache_dir` (default `output/repaired_cache`).
 - Filename template: `repaired_{strategy}_{stem}_{hash8}.mp4`.
-- Hash: first eight characters of the MD5 digest of the absolute input path.
+- Hash: BLAKE2s (8 hex chars) digest of the absolute input path for collision resistance.
 - Legacy files named `repaired_{strategy}_{filename}` are migrated in-place on
   discovery.
 - A hidden JSON file `.preprocessing_progress.json` stores progress to support

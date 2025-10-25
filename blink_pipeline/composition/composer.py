@@ -456,7 +456,8 @@ class ModularComposer:
                 start_time=relative_start,
                 duration=clip.duration,
                 audio_quality_score=clip.quality_score.overall if clip.quality_score else 0.5,
-                video_quality_score=clip.quality_score.overall if clip.quality_score else 0.5
+                video_quality_score=clip.quality_score.overall if clip.quality_score else 0.5,
+                alignment_offset=float(getattr(clip, 'alignment_offset', 0.0))
             ))
 
         return timeline_clips

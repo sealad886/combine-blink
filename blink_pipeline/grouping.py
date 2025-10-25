@@ -32,12 +32,13 @@ def group_videos(video_files: list[dict[str, Any]], max_diff_seconds: int) -> li
     current_group = [sorted_files[0]]
 
     for video in sorted_files[1:]:
-        # Calculate time difference from the MOST RECENT clip in current group
-        # This allows for overlapping windows where cameras trigger sequentially
-        most_recent_in_group = max(clip['datetime'] for clip in current_group)
-        time_diff = (video['datetime'] - most_recent_in_group).total_seconds()
+        # Calculate time difference from the EARLIEST clip in current group
+        # Using earliest anchor prevents chain-grouping across long spans where clips
+        # start just within the window from the most recent clip.
+        earliest_in_group = min(clip['datetime'] for clip in current_group)
+        time_diff = (video['datetime'] - earliest_in_group).total_seconds()
 
-        # If this video starts within the grouping window from most recent, add to current group
+        # If this video starts within the grouping window from earliest, add to current group
         if time_diff <= max_diff_seconds:
             current_group.append(video)
         else:
